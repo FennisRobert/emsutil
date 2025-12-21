@@ -3,3 +3,4 @@ from . import lib
 from .const import C0, Z0, PI, MU0, EPS0
 import isola
 import rogers
+from .emdata import FarFieldComponent, FarFieldData, EHField
