@@ -1,4 +1,4 @@
-from ..material import Material, FreqDependent
+from .material import Material, FreqDependent
 from scipy.interpolate import interp1d
 import numpy as np
 
