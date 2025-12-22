@@ -53,7 +53,7 @@ class FarFieldComponent:
         return np.sqrt(np.abs(self.F[0,:])**2 + np.abs(self.F[1,:])**2 + np.abs(self.F[2,:])**2)
     
 @dataclass
-class FarFieldData:
+class EHFieldFF:
     _E: np.ndarray
     _H: np.ndarray
     theta: np.ndarray
@@ -236,21 +236,41 @@ class FarFieldData:
 
 @dataclass
 class EHField:
+    _E: np.ndarray
+    _H: np.ndarray
     x: np.ndarray
     y: np.ndarray
     z: np.ndarray
-    Ex: np.ndarray
-    Ey: np.ndarray
-    Ez: np.ndarray
-    Hx: np.ndarray
-    Hy: np.ndarray
-    Hz: np.ndarray
     freq: float
-    er: np.ndarray
-    ur: np.ndarray
+    er: np.ndarray | None = field(default=None)
+    ur: np.ndarray | None = field(default=None)
     aux: dict[str, np.ndarray] = field(default_factory=dict)
     
 
+    @property
+    def Ex(self) -> np.ndarray:
+        return self.E[0,:]
+    
+    @property
+    def Ey(self) -> np.ndarray:
+        return self.E[1,:]
+    
+    @property
+    def Ez(self) -> np.ndarray:
+        return self.E[2,:]
+    
+    @property
+    def Hx(self) -> np.ndarray:
+        return self.H[0,:]
+    
+    @property
+    def Hy(self) -> np.ndarray:
+        return self.H[1,:]
+    
+    @property
+    def Hz(self) -> np.ndarray:
+        return self.H[2,:]
+    
     @property
     def k0(self) -> float:
         return self.freq*2*np.pi/299792458
@@ -293,11 +313,11 @@ class EHField:
     
     @property
     def Emat(self) -> np.ndarray:
-        return np.array([self.Ex, self.Ey, self.Ez])
+        return self.E
     
     @property
     def Hmat(self) -> np.ndarray:
-        return np.array([self.Hx, self.Hy, self.Hz])
+        return self.H
     
     @property
     def Pmat(self) -> np.ndarray:
@@ -322,10 +342,20 @@ class EHField:
     @property
     def EH(self) -> tuple[np.ndarray, np.ndarray]:
         ''' Return the electric and magnetic field as a tuple of numpy arrays '''
-        return np.array([self.Ex, self.Ey, self.Ez]), np.array([self.Hx, self.Hy, self.Hz])
+        return self.E, self
     
     @property
-    def E(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def E(self) -> np.ndarray:
+        ''' Return the electric field as a numpy array '''
+        return self._E
+    
+    @property
+    def H(self) -> np.ndarray:
+        ''' Return the magnetic field as a numpy array '''
+        return self._H
+    
+    @property
+    def Exyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the electric field as a tuple of numpy arrays '''
         return self.Ex, self.Ey, self.Ez
     
@@ -354,32 +384,57 @@ class EHField:
         return 0.5*(self.Ex*np.conj(self.Hy) - self.Ey*np.conj(self.Hx))
     
     @property
-    def B(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def B(self) -> np.ndarray:
+        ''' Return the magnetic field as a numpy array '''
+        return np.array([self.Bx, self.By, self.Bz])
+    
+    @property
+    def Bxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the magnetic field as a tuple of numpy arrays '''
         return self.Bx, self.By, self.Bz
     
     @property
-    def P(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def Pxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the polarization field as a tuple of numpy arrays '''
         return self.Px, self.Py, self.Pz
 
     @property
-    def D(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the electric displacement field as a tuple of numpy arrays '''
-        return self.Bx, self.By, self.Bz
+    def P(self) -> np.ndarray:
+        ''' Return the polarization field as a numpy array '''
+        return np.array([self.Px, self.Py, self.Pz])
     
     @property
-    def H(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def D(self) -> np.ndarray:
+        ''' Return the electric displacement field as a numpy array '''
+        return np.array([self.Dx, self.Dy, self.Dz])
+    
+    @property
+    def Dxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ''' Return the electric displacement field as a tuple of numpy arrays '''
+        return self.Dx, self.Dy, self.Dz
+
+    @property
+    def Hxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the magnetic field as a tuple of numpy arrays '''
         return self.Hx, self.Hy, self.Hz
 
     @property
-    def S(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def S(self) -> np.ndarray:
+        ''' Return the poynting vector field as a numpy array '''
+        return np.array([self.Sx, self.Sy, self.Sz])
+    
+    @property
+    def Sxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the poynting vector field as a tuple of numpy arrays '''
         return self.Sx, self.Sy, self.Sz
     
     @property
-    def Sm(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def Sm(self) -> np.ndarray:
+        ''' Return the poynting vector field as a numpy array '''
+        return np.array([self.Smx, self.Smy, self.Smz])
+    
+    @property
+    def Smxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the poynting vector field as a tuple of numpy arrays '''
         return self.Smx, self.Smy, self.Smz
     
