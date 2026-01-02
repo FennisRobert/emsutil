@@ -3,3 +3,5 @@ from .const import C0, Z0, PI, MU0, EPS0
 from .emdata import FarFieldComponent, EHFieldFF, EHField
 from .material import Material, MatProperty, FreqCoordDependent, FreqDependent, CoordDependent
 from .lib import EISO, EOMNI, EPS0, AIR, PEC, COPPER
+from .pyvista.display_settings import EMergeTheme
+from . import themes

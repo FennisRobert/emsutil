@@ -51,7 +51,69 @@ class FarFieldComponent:
     @property
     def norm(self) -> np.ndarray:
         return np.sqrt(np.abs(self.F[0,:])**2 + np.abs(self.F[1,:])**2 + np.abs(self.F[2,:])**2)
+
+
+
+@dataclass
+class FieldPlotData:
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    F: np.ndarray | None =  field(default=None)
+    tris: np.ndarray | None =  field(default=None)
+    boundary: bool = field(default=False)
+    vx: np.ndarray | None = field(default=None)
+    vy: np.ndarray | None = field(default=None)
+    vz: np.ndarray | None = field(default=None)
     
+    
+    @property
+    def _is_quiver(self) -> bool:
+        return self.vx is not None and self.vy is not None and self.vz is not None
+    
+    @property
+    def xyzf(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Returns the X, Y, Z, F arrays.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The X, Y, Z, F arrays
+        """
+        return (self.x, self.y, self.z, self.F)
+
+    @property
+    def xyzftri(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Returns the X, Y, Z, F + triangulation arrays.
+
+        Raises:
+            ValueError: If tris is None
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The X, Y, Z, F, tris arrays
+        """
+        if self.tris is None:
+            raise ValueError("tris is None")
+        return (self.x, self.y, self.z, self.F, self.tris)
+    
+    def __iter__(self):
+        if self.vx is not None:
+            yield self.x
+            yield self.y
+            yield self.z
+            yield self.vx
+            yield self.vy
+            yield self.vz
+        elif self.boundary:
+            yield self.x
+            yield self.y
+            yield self.z
+            yield self.F
+            yield self.tris
+        else:
+            yield self.x
+            yield self.y
+            yield self.z
+            yield self.F
+            
 @dataclass
 class EHFieldFF:
     _E: np.ndarray
@@ -59,7 +121,7 @@ class EHFieldFF:
     theta: np.ndarray
     phi: np.ndarray
     Ptot: float
-    ang: np.ndarray | None = None
+    ang: np.ndarray | None = field(default=None)
     
     def total_radiated_power_integral(
         self,
@@ -67,6 +129,15 @@ class EHFieldFF:
         use: str = "EH",              # "EH" or "E"
         degrees: bool | None = None,  # auto if None
     ) -> float:
+        """Integrates the total radiated power from the far-field E and H fields.
+
+        Args:
+            r (float, optional): The integration radius. Defaults to 1.0.
+            use (str, optional): Wether to use the E and H field or E field only. Defaults to "EH".
+
+        Returns:
+            float: The total radiated power.
+        """
         E = np.asarray(self._E)
         H = np.asarray(self._H)
         th = np.asarray(self.theta, float)
@@ -197,11 +268,11 @@ class EHFieldFF:
              polarization: Literal['Ex','Ey','Ez','Etheta','Ephi','normE','Erhcp','Elhcp','AR'],
              quantity: Literal['abs','real','imag','angle'] = 'abs',
              isotropic: bool = True, dB: bool = False, dBfloor: float = -30, rmax: float | None = None,
-             offset: tuple[float, float, float] = (0,0,0)) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+             offset: tuple[float, float, float] = (0,0,0)) -> FieldPlotData:
         """Returns the parameters to be used as positional arguments for the display.add_surf() function.
 
         Example:
-        >>> model.display.add_surf(*dataset.field[n].farfield_3d(...).surfplot())
+        >>> model.display.add_field(dataset.field[n].farfield_3d(...).surfplot())
 
         Args:
             polarization ('Ex','Ey','Ez','Etheta','Ephi','normE'): What quantity to plot
@@ -210,7 +281,7 @@ class EHFieldFF:
             dBfloor (float, optional): The dB value to take as R=0. Defaults to -10.
 
         Returns:
-            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The X, Y, Z, F values
+            FieldPlotData: The plot data object
         """
         fmap = {
             'abs': np.abs,
@@ -232,7 +303,7 @@ class EHFieldFF:
         ys = F*np.sin(self.theta)*np.sin(self.phi) + offset[1]
         zs = F*np.cos(self.theta) + offset[2]
 
-        return xs, ys, zs, F
+        return FieldPlotData(x=xs, y=ys, z=zs, F=F)
 
 @dataclass
 class EHField:
@@ -244,9 +315,18 @@ class EHField:
     freq: float
     er: np.ndarray | None = field(default=None)
     ur: np.ndarray | None = field(default=None)
+    sig: np.ndarray | None = field(default=None)
     aux: dict[str, np.ndarray] = field(default_factory=dict)
+    _Js: np.ndarray | None = field(default=None)
     
-
+    def __post_init__(self):
+        if self._Js is None:
+            self._Js = self._E*0
+    
+    @property
+    def k0(self) -> float:
+        return self.freq*2*np.pi/299792458
+    
     @property
     def Ex(self) -> np.ndarray:
         return self.E[0,:]
@@ -272,8 +352,16 @@ class EHField:
         return self.H[2,:]
     
     @property
-    def k0(self) -> float:
-        return self.freq*2*np.pi/299792458
+    def Jsx(self) -> np.ndarray:
+        return self._Js[0,:]
+    
+    @property
+    def Jsy(self) -> np.ndarray:
+        return self._Js[1,:]
+    
+    @property
+    def Jsz(self) -> np.ndarray:
+        return self._Js[2,:]
     
     @property
     def Px(self) -> np.ndarray:
@@ -286,6 +374,30 @@ class EHField:
     @property
     def Pz(self) -> np.ndarray:
         return EPS0*(self.er-1)*self.Ez
+    
+    @property
+    def Jvx(self) -> np.ndarray:
+        return self.Ex*self.sig
+    
+    @property
+    def Jvy(self) -> np.ndarray:
+        return self.Ey*self.sig
+    
+    @property
+    def Jvz(self) -> np.ndarray:
+        return self.Ez*self.sig
+    
+    @property
+    def Jv(self) -> np.ndarray:
+        return np.array([self.Jvx, self.Jvy, self.Jvz])
+    
+    @property
+    def Jvxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return (self.Jvx, self.Jvy, self.Jvz)
+    
+    @property
+    def Jsxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return (self.Jsx, self.Jsy, self.Jsz)
     
     @property
     def Dx(self) -> np.ndarray:
@@ -409,6 +521,10 @@ class EHField:
         return np.array([self.Dx, self.Dy, self.Dz])
     
     @property
+    def Js(self) -> np.ndarray:
+        return self._Js
+    
+    @property
     def Dxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ''' Return the electric displacement field as a tuple of numpy arrays '''
         return self.Dx, self.Dy, self.Dz
@@ -468,6 +584,14 @@ class EHField:
         return np.sqrt(np.abs(self.Dx)**2 + np.abs(self.Dy)**2 + np.abs(self.Dz)**2)
     
     @property
+    def normJv(self) -> np.ndarray:
+        return np.sqrt(np.abs(self.Jvx)**2 + np.abs(self.Jvy)**2 + np.abs(self.Jvz)**2)
+    
+    @property
+    def normJs(self) -> np.ndarray:
+        return np.sqrt(np.abs(self.Jsx)**2 + np.abs(self.Jsy)**2 + np.abs(self.Jsz)**2)
+    
+    @property
     def normS(self) -> np.ndarray:
         """The complex norm of the S-field
         """
@@ -487,7 +611,7 @@ class EHField:
             field = field_arry
         return field
     
-    def vector(self, field: Literal['E','H'], metric: Literal['real','imag','complex'] = 'real') -> tuple[np.ndarray, np.ndarray,np.ndarray,np.ndarray,np.ndarray,np.ndarray]:
+    def vector(self, field: Literal['E','H'], metric: Literal['real','imag','complex'] = 'real') -> FieldPlotData:
         """Returns the X,Y,Z,Fx,Fy,Fz data to be directly cast into plot functions.
 
         The field can be selected by a string literal. The metric of the complex vector field by the metric.
@@ -498,7 +622,7 @@ class EHField:
             metric ([]'real','imag','complex'], optional): the metric to impose on the field. Defaults to 'real'.
 
         Returns:
-            tuple[np.ndarray,...]: The X,Y,Z,Fx,Fy,Fz arrays
+            FieldPlotData: The plot data object
         """
         Fx, Fy, Fz = getattr(self, field)
         
@@ -507,9 +631,10 @@ class EHField:
         elif metric=='imag':
             Fx, Fy, Fz = Fx.imag, Fy.imag, Fz.imag
         
-        return self.x, self.y, self.z, Fx, Fy, Fz
+        return FieldPlotData(x=self.x, y=self.y, z=self.z, vx=Fx, vy=Fy, vz=Fz)
     
-    def scalar(self, field: Literal['Ex','Ey','Ez','Hx','Hy','Hz','normE','normH'] | str, metric: Literal['abs','real','imag','complex'] = 'real') -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    
+    def scalar(self, field: Literal['Ex','Ey','Ez','Hx','Hy','Hz','normE','normH'] | str, metric: Literal['abs','real','imag','complex'] = 'real') -> FieldPlotData:
         """Returns the data X, Y, Z, Field based on the interpolation
 
         For animations, make sure to select the complex metric.
@@ -519,7 +644,7 @@ class EHField:
             metric (str, optional): The metric to impose on the plot. Defaults to 'real'.
 
         Returns:
-            (X,Y,Z,Field): The coordinates plus field scalar
+            FieldPlotData: The plot data object
         """
         if field in self.aux:
             field_arry = self.aux[field]
@@ -534,7 +659,12 @@ class EHField:
             field = field_arry.imag
         elif metric=='complex':
             field = field_arry
-        return self.x, self.y, self.z, field_arry
+        
+        
+        if 'boundary' not in self.aux:
+            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry)
+        else:
+            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, tris=self.aux['tris'], boundary=True)
 
     def int(self, field: str | Callable, metric: Literal['abs','real','imag','complex',''] = '') -> float | complex:
         if isinstance(field, Callable):
