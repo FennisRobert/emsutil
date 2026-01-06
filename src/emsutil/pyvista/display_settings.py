@@ -29,9 +29,10 @@ class EMergeTheme:
     
     def __init__(self):
         
+        
         # Generic Controls
         self.aa_active: bool = True
-        self.aa_mode: str = "msaa"
+        self.aa_mode: Literal['msaa', 'fxaa', 'ssaa'] = "msaa"
         self.aa_samples: int = 8
         
         # Background
@@ -44,10 +45,12 @@ class EMergeTheme:
         self.draw_zplane: bool = False
         self.draw_xgrid: bool = False
         self.draw_ygrid: bool = False
-        self.draw_zgrid: bool = True
-        self.draw_xax: bool = True
-        self.draw_yax: bool = True
-        self.draw_zax: bool = True
+        self.draw_zgrid: bool = False
+        self.draw_xax: bool = False
+        self.draw_yax: bool = False
+        self.draw_zax: bool = False
+        self.draw_pvgrid: bool = True
+        self.draw_pvaxes: bool = True
         
         self.axis_color: str = "#000000"
         self.axis_x_color: str = "#ff007b"

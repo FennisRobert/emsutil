@@ -106,7 +106,7 @@ class _Tron(EMergeTheme):
         self.axis_x_color = "#FFFF00FF"
         self.axis_y_color = "#00FFFFFF"
         self.axis_z_color = "#FF00FFFF"
-        
+        self.draw_pvaxes = True
         self.aa_active = True
         self.aa_samples = 5
         self.cmap_npts = 32

@@ -202,6 +202,7 @@ class EMergeDisplay:
         self._isometric: bool = False
         self._bwdrawing: bool = False
 
+        self._bounds: tuple[float, float, float, float, float, float] | None = None
         self._cbar_args: dict = {}
         self._cbar_lim: tuple[float, float] | None = None
         self.camera_position = (1, -1, 1)     # +X, +Z, -Y
@@ -412,6 +413,23 @@ class EMergeDisplay:
             # Turn off directional lighting
             self._plot.remove_all_lights()
         
+        if self.set.theme.draw_pvgrid:
+            pv.set_plot_theme('dark')
+            bounds = self._bounds
+            extra_factor = 0.1
+            dx = (bounds[1] - bounds[0])*extra_factor
+            dy = (bounds[3] - bounds[2])*extra_factor
+            dz = (bounds[5] - bounds[4])*extra_factor
+            ds = max(dx, dy, dz)
+            bounds = (bounds[0]-ds, bounds[1]+ds, bounds[2]-ds, bounds[3]+ds, bounds[4]-ds, bounds[5]+ds)
+            pv.global_theme.font.fmt = "%.3f"
+            actor = self._plot.show_grid(
+                bounds=bounds,
+                color=self.set.theme.text_color,
+                fmt="%.3f",
+                
+            )
+
         pv.global_theme.font.color = self.set.theme.text_color
         pv.global_theme.colorbar_horizontal.width = 0.4
         pv.global_theme.colorbar_vertical.height = 0.15
@@ -985,6 +1003,68 @@ class EMergeDisplay:
         pl = self._plot.add_arrows(Coo, Vec, scalars=None, clim=None, cmap=cmap, **kwargs)
         self._data_sets.append(pl.mapper.dataset)
         self._reset_cbar()
+    
+    def add_clip_volume(self,
+                     X: np.ndarray,
+                     Y: np.ndarray,
+                     Z: np.ndarray,
+                     V: np.ndarray,
+                     scale: Literal['lin','log','symlog'] = 'lin',
+                     symmetrize: bool = False,
+                     clim: tuple[float, float] | None = None,
+                     cmap: cmap_names | None = None,
+                     opacity: float = 0.8):
+        """Adds a 3D volumetric contourplot based on a 3D grid of X,Y,Z and field values
+
+        Args:
+            X (np.ndarray): A 3D Grid of X-values
+            Y (np.ndarray): A 3D Grid of Y-values
+            Z (np.ndarray): A 3D Grid of Z-values
+            V (np.ndarray): The scalar quantity to plot ()
+            Nlevels (int, optional): The number of contour levels. Defaults to 5.
+            symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
+            cmap (str, optional): The color map. Defaults to 'viridis'.
+        """
+        Vf = V.flatten()
+        Vf = np.nan_to_num(Vf)
+        vmin = np.min(np.real(Vf))
+        vmax = np.max(np.real(Vf))
+        
+        default_cmap = self.set.theme.default_amplitude_cmap
+        
+        if scale=='log':
+            T = lambda x: np.log10(np.abs(x+1e-12))
+        elif scale=='symlog':
+            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x*np.log(10)))
+        else:
+            T = lambda x: x
+        
+        if symmetrize:
+            level = np.max(np.abs(Vf))
+            vmin, vmax = (-level, level)
+            default_cmap = self.set.theme.default_wave_cmap
+        
+        if clim is None:
+            if self._cbar_lim is not None:
+                clim = self._cbar_lim
+                vmin, vmax = clim
+            else:
+                clim = (vmin, vmax)
+        
+        if cmap is None:
+            cmap = default_cmap
+        else:
+            cmap = self.set.theme.parse_cmap_name(cmap)
+            
+        grid = pv.StructuredGrid(X,Y,Z)
+        field = V.flatten(order='F')
+        grid['anim'] = T(np.real(field))
+        
+        
+        self._plot.add_mesh_clip_plane(grid, opacity=opacity, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
+        #actor = self._wrap_plot(contour, opacity=opacity, cmap=cmap, clim=clim, pickable=False, scalar_bar_args=self._cbar_args)
+        
+        self._reset_cbar()
         
     def add_contour(self,
                      X: np.ndarray,
@@ -1082,6 +1162,8 @@ class EMergeDisplay:
             
         #self._plot.add_logo_widget('src/_img/logo.jpeg',position=(0.89,0.89), size=(0.1,0.1))    
         bounds = self._plot.bounds
+        self._bounds = bounds
+        
         xmin, xmax, ymin, ymax, zmin, zmax = self._plot.bounds
         
         max_size = max([abs(dim) for dim in [bounds.x_max, bounds.x_min, bounds.y_max, bounds.y_min, bounds.z_max, bounds.z_min]])
