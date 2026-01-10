@@ -413,7 +413,7 @@ class EMergeDisplay:
             # Turn off directional lighting
             self._plot.remove_all_lights()
         
-        if self.set.theme.draw_pvgrid:
+        if self.set.theme.draw_pvgrid and not self._bwdrawing:
             pv.set_plot_theme('dark')
             bounds = self._bounds
             extra_factor = 0.1
@@ -439,6 +439,10 @@ class EMergeDisplay:
         else:
             self._plot.disable_anti_aliasing()
         self._plot.title = 'EMerge'
+        if self._bwdrawing:
+            self._plot.set_background('white', top='white') # type: ignore
+        else:
+            self._plot.set_background(self.set.theme.backgroung_grad_1, top=self.set.theme.backgroung_grad_2) # type: ignore
             
     def _reset(self):
         self._plot.close()
@@ -1369,7 +1373,7 @@ class EMergeDisplay:
             light.set_direction_angle(*self.set.light_angle) # type: ignore
             self._plot.add_light(light)
 
-        self._plot.set_background(self.set.theme.backgroung_grad_1, top=self.set.theme.backgroung_grad_2) # type: ignore
+        
         self._plot.add_axes(color=self.set.theme.text_color,
                             x_color=col_x,
                             y_color=col_y,
