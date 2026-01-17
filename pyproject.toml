@@ -4,7 +4,7 @@ allow-direct-references = true
 
 [project]
 name = "emsutil"
-version = "0.2.2"
+version = "0.3.0"
 description = "Common utilities for Emerge projects EMerge, Optycal and Heavi"
 readme = "README.md"
 requires-python = ">=3.10"
