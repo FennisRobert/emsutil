@@ -7,6 +7,8 @@ from .lib import EISO, EOMNI
 @dataclass
 class FarFieldComponent:
     F: np.ndarray
+    _th: np.ndarray
+    _ph: np.ndarray
 
     @property
     def x(self) -> np.ndarray:
@@ -22,16 +24,16 @@ class FarFieldComponent:
     
     @property
     def theta(self) -> np.ndarray:
-        thx = np.cos(self.theta)*np.cos(self.phi)
-        thy = np.cos(self.theta)*np.sin(self.phi)
-        thz = -np.sin(self.theta)
+        thx = np.cos(self._th)*np.cos(self._ph)
+        thy = np.cos(self._th)*np.sin(self._ph)
+        thz = -np.sin(self._th)
         return thx*self.F[0,:] + thy*self.F[1,:] + thz*self.F[2,:]
     
     @property
     def phi(self) -> np.ndarray:
-        phx = -np.sin(self.phi)
-        phy = np.cos(self.phi)
-        phz = np.zeros_like(self.theta)
+        phx = -np.sin(self._ph)
+        phy = np.cos(self._ph)
+        phz = np.zeros_like(self._th)
         return phx*self.F[0,:] + phy*self.F[1,:] + phz*self.F[2,:]
     
     @property
@@ -122,6 +124,7 @@ class EHFieldFF:
     phi: np.ndarray
     Ptot: float
     ang: np.ndarray | None = field(default=None)
+    freq: float | None = field(default=None)
     
     def total_radiated_power_integral(
         self,
@@ -183,11 +186,11 @@ class EHFieldFF:
     
     @property
     def E(self) -> np.ndarray:
-        return FarFieldComponent(self._E)
+        return FarFieldComponent(self._E, self.theta, self.phi)
     
     @property
     def H(self) -> np.ndarray:
-        return FarFieldComponent(self._H)
+        return FarFieldComponent(self._H, self.theta, self.phi)
     
     @property
     def Ex(self) -> np.ndarray:
@@ -244,16 +247,16 @@ class EHFieldFF:
     @property
     def gain(self, kind: Literal['iso','omni'] = 'iso') -> FarFieldComponent:
         if kind=='iso':
-            return FarFieldComponent(self._E/EISO)
+            return FarFieldComponent(self._E/EISO, self.theta, self.phi)
         else:
-            return FarFieldComponent(self._E/EOMNI)
+            return FarFieldComponent(self._E/EOMNI, self.theta, self.phi)
         
     @property
     def dir(self, kind: Literal['iso','omni'] = 'iso') -> FarFieldComponent:
         if kind=='iso':
-            return FarFieldComponent(self._E/(EISO*(self.Ptot)**0.5))
+            return FarFieldComponent(self._E/(EISO*(self.Ptot)**0.5), self.theta, self.phi)
         else:
-            return FarFieldComponent(self._E/(EOMNI*(self.Ptot)**0.5))
+            return FarFieldComponent(self._E/(EOMNI*(self.Ptot)**0.5), self.theta, self.phi)
     
     @property
     def normE(self) -> np.ndarray:

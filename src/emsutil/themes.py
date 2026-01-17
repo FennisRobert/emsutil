@@ -184,8 +184,66 @@ class _Document(EMergeTheme):
             "#4DBEEEFF",
         ]
 
+class Stylish(EMergeTheme):
+    """ A custom EMerge theme. """
+    def define(self):
+        self.backgroung_grad_1 = "#FFFFFF"
+        self.backgroung_grad_2 = "#FFFFFF"
+        self.grid_color = "#676767FF"
+        self.brightness = 1.0
+        
+        self.label_color = "#FFFFFF"
+        self.text_color = "#000000FF"
+        self.render_metal = True
+        self.line_width = 3.0
+        
+        self.geo_edge_width = 3.0
+        self.geo_edge_color = "#000000ff"
+        
 
+        self.draw_xax = False
+        self.draw_yax = False
+        self.draw_zax = False
+        self.draw_xplane = False
+        self.draw_yplane = False
+        self.draw_zplane = False
+        self.draw_xgrid = False
+        self.draw_ygrid = False
+        self.draw_zgrid = False
+        
+        self.axis_x_color = "#FF0000FF"
+        self.axis_y_color = "#00FF00FF"
+        self.axis_z_color = "#0000FFFF"
+
+        self.aa_active = True
+        self.aa_samples = 5
+        self.cmap_npts = 64
+        
+        self.draw_pvgrid = False
+        self.render_shadows = True
+        # Basic clear academic scales
+        # Amplitude is Jet
+        # Wave is blue to transparent to red
+        
+        self.colormaps = {
+            'amplitude': (("#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000"),(0.0, 0.25, 0.5, 0.75, 1.0)),
+            'wave': (("#FF0000", "#FFAAAA00","#0000FF00", "#0000FF"), (0.0, 0.49, 0.51, 1.0)),
+        }
+        
+        self.render_style = 'surface'
+        
+        # Clear high contrast matlab colors for paper
+        self.line_color_cycle = [
+            "#0072BDFF",
+            "#D95319FF",
+            "#EDB120FF",
+            "#7E2F8EFF",
+            "#77AC30FF",
+            "#4DBEEEFF",
+        ]
+        
 VaporWave = _VaporWave()
 Vintage = _Vintage()
 Tron = _Tron()
 Document = _Document()
+Stylish = Stylish()
