@@ -234,12 +234,12 @@ class Stylish(EMergeTheme):
         
         # Clear high contrast matlab colors for paper
         self.line_color_cycle = [
-            "#0072BDFF",
-            "#D95319FF",
-            "#EDB120FF",
-            "#7E2F8EFF",
-            "#77AC30FF",
-            "#4DBEEEFF",
+            "#003E67FF",
+            "#7F2600FF",
+            "#5B09A7FF",
+            "#0C5D14FF",
+            "#A35100FF",
+            "#6C006AFF",
         ]
         
 VaporWave = _VaporWave()

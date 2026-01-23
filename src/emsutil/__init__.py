@@ -5,3 +5,4 @@ from .material import Material, MatProperty, FreqCoordDependent, FreqDependent, 
 from .lib import EISO, EOMNI, EPS0, AIR, PEC, COPPER
 from .pyvista.display_settings import EMergeTheme
 from . import themes
+from .file import Saveable, save_object, load_object

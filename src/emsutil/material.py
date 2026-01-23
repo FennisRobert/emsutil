@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Callable
 import inspect
+from .file import Saveable
 
 C0 = 299792458
 
@@ -45,15 +46,16 @@ def _to_mat(value: float | complex | int | np.ndarray) -> np.ndarray:
     else:
         return ValueError(f'Trying to parse {value} as a material property tensor but it cant be identified as scalar, vector or matrix')
 
-class MatProperty:
+class MatProperty(Saveable):
     _freq_dependent: bool = False
     _coord_dependent: bool = False
     _pickle_exclude = {"_func","_fmax"}
+    skip_fields = ("_func","_fmax")
     """The MatProperty class is an interface for EMerge to deal with frequency and coordinate dependent material properties
     """
     
     def __init__(self, value: float | complex | int | np.ndarray):
-        self.value: np.ndarray = _to_mat(value)
+        self._value: np.ndarray = _to_mat(value)
         
         self._apply_to: np.ndarray = np.array([], dtype=np.int64)
         self._x: np.ndarray = np.array([], dtype=np.float64)
@@ -69,11 +71,15 @@ class MatProperty:
         self._z = np.concatenate([self._z, z])
         
     def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
-        data[:,:,self._apply_to] = np.repeat(self.value[:,:,np.newaxis], self._apply_to.shape[0], axis=2)
+        data[:,:,self._apply_to] = np.repeat(self._value[:,:,np.newaxis], self._apply_to.shape[0], axis=2)
         return data
 
+    @property
+    def value(self) -> float:
+        return self._value[0,0]
+    
     def scalar(self, f: float):
-        return self.value[0,0]
+        return self._value[0,0]
 
     def reset(self) -> None:
         self._apply_to: np.ndarray = np.array([], dtype=np.int64)
@@ -93,10 +99,10 @@ class MatProperty:
         for k in self._pickle_exclude:
             setattr(self, k, None)
     
-class FreqDependent(MatProperty):
+class FreqDependent(MatProperty, Saveable):
     _freq_dependent: bool = True
     _coord_dependent: bool = False
-
+    skip_fields = ("_func","_fmax")
     def __init__(self, 
                  scalar: Callable | None = None,
                  vector: Callable | None = None,
@@ -115,8 +121,6 @@ class FreqDependent(MatProperty):
             vector (Callable | None, optional): The diagonal rank-2 tensor function returning a (3,) array. Defaults to None.
             matrix (Callable | None, optional): The rank-2 tensor function returning a (3,3) array. Defaults to None.
 
-        Returns:
-            _type_: _description_
         """
         if scalar is not None:
             def _func(f: float) -> np.ndarray:
@@ -144,12 +148,17 @@ class FreqDependent(MatProperty):
         data[:,:,self._apply_to] = np.repeat(self._func(f)[:,:,np.newaxis], self._apply_to.shape[0], axis=2)
         return data
     
+    @property
+    def value(self) -> float:
+        raise ValueError('Frequency dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency.')
+    
     def scalar(self, f: float):
         return self._func(f)[0,0]
     
-class CoordDependent(MatProperty):
+class CoordDependent(MatProperty,Saveable):
     _freq_dependent: bool = False
     _coord_dependent: bool = True
+    skip_fields = ("_func","_fmax")
     def __init__(self, 
                  max_value: float,
                  scalar: Callable | None = None,
@@ -173,9 +182,7 @@ class CoordDependent(MatProperty):
             scalar (Callable | None, optional): The scalar value function returning a float/complex. Defaults to None.
             vector (Callable | None, optional): The diagonal rank-2 tensor function returning a (3,) array. Defaults to None.
             matrix (Callable | None, optional): The rank-2 tensor function returning a (3,3) array. Defaults to None.
-
-        Returns:
-            _type_: _description_
+            
         """
         
         if scalar is not None:
@@ -211,13 +218,17 @@ class CoordDependent(MatProperty):
         data[:,:,self._apply_to] = self._func(self._x, self._y, self._z)
         return data
 
+    @property
+    def value(self) -> float:
+        return self._func(0,0,0)[0,0]
+    
     def scalar(self, f: float):
         return self._func(0,0,0)[0,0]
     
-class FreqCoordDependent(MatProperty):
+class FreqCoordDependent(MatProperty, Saveable):
     _freq_dependent: bool = True
     _coord_dependent: bool = True
-    
+    skip_fields = ("_func","_fmax")
     def __init__(self, 
                  max_value: float,
                  scalar: Callable | None = None,
@@ -240,8 +251,6 @@ class FreqCoordDependent(MatProperty):
             vector (Callable | None, optional): The diagonal rank-2 tensor function returning a (3,) array. Defaults to None.
             matrix (Callable | None, optional): The rank-2 tensor function returning a (3,3) array. Defaults to None.
 
-        Returns:
-            _type_: _description_
         """
         if scalar is not None:
             def _func(f, x, y, z) -> np.ndarray:
@@ -277,10 +286,14 @@ class FreqCoordDependent(MatProperty):
         data[:,:,self._apply_to] = self._func(f,self._x, self._y,self._z)
         return data
     
+    @property
+    def value(self) -> float:
+        raise ValueError('Frequency and coordinate dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency and coordinate.')
+    
     def scalar(self, f: float):
         return self._func(f, 0,0,0)[0,0]
 
-class Material:
+class Material(Saveable):
     """The Material class generalizes a material in the EMerge FEM environment.
 
     If a scalar value is provided for the relative permittivity or the relative permeability
@@ -295,7 +308,7 @@ class Material:
     
     """
     _pickle_exclude = {"_neff"}
-    
+    skip_fields = ("_neff",)
     def __init__(self,
                  er: float | complex | np.ndarray | MatProperty = 1.0,
                  ur: float | complex | np.ndarray | MatProperty = 1.0,
@@ -330,9 +343,11 @@ class Material:
             self._neff: Callable = lambda f: np.sqrt(self.ur._fmax(f)*self.er._fmax(f))
         else:
             self._neff: Callable = lambda f: _neff
-        hex_str = self.color.lstrip('#')
-        self._color_rgb = tuple(int(hex_str[i:i+2], 16)/255.0 for i in (0, 2, 4))
         self._metal: bool = _metal
+    
+    @property
+    def _color_rgb(self) -> tuple[float,float,float]:
+        return tuple(int(self.color.lstrip('#')[i:i+2], 16)/255.0 for i in (0, 2, 4))
     
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -382,18 +397,14 @@ class Material:
     @property
     def frequency_dependent(self) -> bool:
         """If The material property are at all frequency dependent.
-
-        Returns:
-            bool: _description_
+        
         """
         return self.er._freq_dependent or self.ur._freq_dependent or self.tand._freq_dependent or self.cond._freq_dependent
     
     @property
     def coordinate_dependent(self) -> bool:
         """If the material properties are at all coordinate dependent
-
-        Returns:
-            bool: _description_
+        
         """
         return self.er._coord_dependent or self.ur._coord_dependent or self.tand._coord_dependent or self.cond._coord_dependent
     

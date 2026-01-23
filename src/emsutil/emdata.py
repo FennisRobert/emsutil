@@ -3,9 +3,10 @@ from dataclasses import dataclass, field
 from typing import Literal, Callable
 from .const import Z0, EPS0
 from .lib import EISO, EOMNI
+from .file import Saveable
 
 @dataclass
-class FarFieldComponent:
+class FarFieldComponent(Saveable):
     F: np.ndarray
     _th: np.ndarray
     _ph: np.ndarray
@@ -57,7 +58,7 @@ class FarFieldComponent:
 
 
 @dataclass
-class FieldPlotData:
+class FieldPlotData(Saveable):
     x: np.ndarray
     y: np.ndarray
     z: np.ndarray
@@ -81,6 +82,16 @@ class FieldPlotData:
             tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The X, Y, Z, F arrays
         """
         return (self.x, self.y, self.z, self.F)
+
+    @property
+    def xyzvec(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Returns the X, Y, Z, F arrays.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The X, Y, Z, F arrays
+        """
+        return (self.x, self.y, self.z, self.vx, self.vy, self.vz)
+
 
     @property
     def xyzftri(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -117,7 +128,7 @@ class FieldPlotData:
             yield self.F
             
 @dataclass
-class EHFieldFF:
+class EHFieldFF(Saveable):
     _E: np.ndarray
     _H: np.ndarray
     theta: np.ndarray
@@ -309,7 +320,7 @@ class EHFieldFF:
         return FieldPlotData(x=xs, y=ys, z=zs, F=F)
 
 @dataclass
-class EHField:
+class EHField(Saveable):
     _E: np.ndarray
     _H: np.ndarray
     x: np.ndarray
@@ -628,6 +639,7 @@ class EHField:
             FieldPlotData: The plot data object
         """
         Fx, Fy, Fz = getattr(self, field)
+        
         
         if metric=='real':
             Fx, Fy, Fz = Fx.real, Fy.real, Fz.real
