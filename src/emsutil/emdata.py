@@ -303,16 +303,22 @@ class EHFieldFF(Saveable):
             'imag': np.imag,
             'angle': np.angle,
         }
-        mapping = fmap.get(quantity.lower(),np.abs)
+        
+        mapping = fmap.get(quantity.lower(), np.abs)
         
         F = mapping(getattr(self, polarization))
         
         if isotropic:
-            F = F/np.sqrt(Z0/(2*np.pi))
+            F = F / np.sqrt(Z0 / (2 * np.pi))
+        
         if dB:
-            F = 20*np.log10(np.clip(np.abs(F), a_min=10**(dBfloor/20), a_max = 1e9))-dBfloor
+            Fabs = np.abs(F)
+            Fabs_clip = np.clip(Fabs, a_min = 10**(dBfloor/20), a_max = 1e9)
+            F = 20 * np.log10(Fabs_clip) - dBfloor
+        
         if rmax is not None:
             F = rmax * F/np.max(F)
+        
         xs = F*np.sin(self.theta)*np.cos(self.phi) + offset[0]
         ys = F*np.sin(self.theta)*np.sin(self.phi) + offset[1]
         zs = F*np.cos(self.theta) + offset[2]

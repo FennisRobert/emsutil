@@ -90,7 +90,7 @@ class EMergeTheme:
         
         self.colormaps: dict[str, tuple[list[str], list[float]]] = {
             'amplitude': (["#1F0061","#4218c0","#2849db", "#ff007b", "#ff7c51"], (0.0, 0.15, 0.3, 0.7, 0.95)),
-            'wave': (["#4ab9ff","#0510B2B8","#0511B200","#CC095400","#CC0954B9","#ff9036"], (0.0, 0.25, 0.49,0.51, 0.75, 1.0))
+            'wave': (["#4ab9ff","#0511B2E3","#0511B200","#CC095400","#CC0954E3","#ff9036"], (0.0, 0.25, 0.49,0.51, 0.75, 1.0))
         }
         
         self.line_color_cycle = [

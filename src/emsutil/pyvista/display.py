@@ -716,6 +716,10 @@ class EMergeDisplay:
         Returns:
             pv.DataSet: _description_
         """
+        smooth_shading = True
+        if self._do_animate:
+            smooth_shading = False
+        
         if field.boundary:
             self.add_trisurf(field.x, field.y, field.z, field.F, field.tris,
                                     scale=scale,
@@ -724,6 +728,7 @@ class EMergeDisplay:
                                     opacity=opacity,
                                     symmetrize=symmetrize,
                                     _fieldname=_fieldname,
+                                    smooth_shading=smooth_shading,
                                     **kwargs)
         elif field._is_quiver:
             self.add_quiver(field.x, field.y, field.z, field.vx, field.vy, field.vz, **kwargs)
@@ -735,7 +740,9 @@ class EMergeDisplay:
                             opacity=opacity,
                             symmetrize=symmetrize,
                             _fieldname=_fieldname,
+                            smooth_shading=smooth_shading,
                             **kwargs)
+    
     def add_surf(self, 
                  x: np.ndarray,
                  y: np.ndarray,
@@ -781,12 +788,11 @@ class EMergeDisplay:
             name = 'anim'+str(self._ctr)
         else:
             name = _fieldname
+            
         self._ctr += 1
         
         grid[name] = static_field
-        
         grid_no_nan = grid.threshold(scalars=name, all_scalars=True)
-        
         default_cmap = self.set.theme.default_amplitude_cmap
         # Determine color limits
         if clim is None:
@@ -810,14 +816,15 @@ class EMergeDisplay:
         # Make sure that thresholded cells that are nan are not plotted grey but invisible
         
         kwargs = setdefault(kwargs, cmap=cmap, clim=clim, opacity=opacity, pickable=False, multi_colors=True)
+        
         actor = self._wrap_plot(grid_no_nan, scalars=name, scalar_bar_args=self._cbar_args, **kwargs)
         
         if self._animate_next:
             def on_update(obj: _AnimObject, phi: complex):
                 field_anim = obj.T(np.real(obj.field * phi))
                 obj.grid[name] = field_anim
-                obj.fgrid[name] = obj.grid.threshold(scalars=name)[name]
-                #obj.fgrid replace with thresholded scalar data.
+                obj.fgrid[name] = obj.grid.threshold(scalars=name, all_scalars=True)[name]
+                
             self._objs.append(_AnimObject(field_flat, T, grid, grid_no_nan, actor, on_update))
             self._animate_next = False
         self._reset_cbar()
@@ -1523,6 +1530,9 @@ class ScreenRuler:
             p1.SetValue(*self.points[0])
             p2.SetValue(*self.points[1])
             self.ruler.SetTitle(f'{1000*self.dist:.2f}mm')
+            x1, y1, z = self.points[0]
+            x2, y2, z = self.points[1]
+            print(f'lp = pcb.lumped_port_pts(({x1:.6f},{y1:.6f}),({x2:.6f},{y2:.6f}),{z:.6f})')
     
     @freeze
     def _add_point(self, point: tuple[float, float, float]):
