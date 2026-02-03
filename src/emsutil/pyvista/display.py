@@ -355,22 +355,30 @@ class EMergeDisplay:
             theme (EMergeTheme): The theme to set.
         """
         self.set.theme = theme
-        
-    def show(self):
+    
+    
+    def show(self, screenshot: str | None = None, off_screen: bool = False):
         """ Shows the Pyvista display. """
+        
+        self._plot.off_screen = off_screen
+        pv.OFF_SCREEN = off_screen
         self._ruler.min_length = self._get_edge_length()
         self._update_camera()
         self._add_aux_items()
         self._apply_theme()
         
-        if self._do_animate:
+    
+        if self._do_animate and screenshot is None:
             self._wire_close_events()
             self.add_text('Press Q to close!', color='red', position='upper_left')
             self._plot.show(auto_close=False, interactive_update=True, before_close_callback=self._close_callback)
             self._animate()
         else:
-            self._plot.show()
-        
+            if screenshot is not None:
+                self._plot.show(screenshot=screenshot, auto_close=True, )
+            else:
+                self._plot.show()
+            
         self._reset()
 
     def _get_path(self, filename: str) -> str:
@@ -454,7 +462,8 @@ class EMergeDisplay:
         self._bwdrawing = False
         self._reset_cbar()
         self.set.theme.line_cycler.reset()
-
+        self._plot.off_screen = False
+        #pv.OFF_SCREEN = False
     def _close_callback(self, arg):
         """The private callback function that stops the animation.
         """
