@@ -4,6 +4,15 @@ from typing import Literal, Callable
 from .const import Z0, EPS0
 from .lib import EISO, EOMNI
 from .file import Saveable
+from enum import Enum
+
+class DataStructure(Enum):
+    NONE = 0
+    GRID1D = 1
+    GRID2D = 2
+    GRID3D = 3
+    TRISURF = 4
+    UNSTRUCTURED = 5
 
 @dataclass
 class FarFieldComponent(Saveable):
@@ -65,9 +74,11 @@ class FieldPlotData(Saveable):
     F: np.ndarray | None =  field(default=None)
     tris: np.ndarray | None =  field(default=None)
     boundary: bool = field(default=False)
+    structure: DataStructure = field(default=DataStructure.NONE)
     vx: np.ndarray | None = field(default=None)
     vy: np.ndarray | None = field(default=None)
     vz: np.ndarray | None = field(default=None)
+    
     
     
     @property
@@ -323,7 +334,7 @@ class EHFieldFF(Saveable):
         ys = F*np.sin(self.theta)*np.sin(self.phi) + offset[1]
         zs = F*np.cos(self.theta) + offset[2]
 
-        return FieldPlotData(x=xs, y=ys, z=zs, F=F)
+        return FieldPlotData(x=xs, y=ys, z=zs, F=F, structure=DataStructure.GRID2D)
 
 @dataclass
 class EHField(Saveable):
@@ -333,6 +344,7 @@ class EHField(Saveable):
     y: np.ndarray
     z: np.ndarray
     freq: float
+    structure: DataStructure = field(default=DataStructure.NONE)
     er: np.ndarray | None = field(default=None)
     ur: np.ndarray | None = field(default=None)
     sig: np.ndarray | None = field(default=None)
@@ -652,7 +664,7 @@ class EHField(Saveable):
         elif metric=='imag':
             Fx, Fy, Fz = Fx.imag, Fy.imag, Fz.imag
         
-        return FieldPlotData(x=self.x, y=self.y, z=self.z, vx=Fx, vy=Fy, vz=Fz)
+        return FieldPlotData(x=self.x, y=self.y, z=self.z, vx=Fx, vy=Fy, vz=Fz, structure=self.structure)
     
     
     def scalar(self, field: Literal['Ex','Ey','Ez','Hx','Hy','Hz','normE','normH'] | str, metric: Literal['abs','real','imag','complex'] = 'real') -> FieldPlotData:
@@ -683,9 +695,9 @@ class EHField(Saveable):
         
         
         if 'boundary' not in self.aux:
-            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry)
+            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, structure=self.structure)
         else:
-            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, tris=self.aux['tris'], boundary=True)
+            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, tris=self.aux['tris'], structure=self.structure, boundary=True)
 
     def int(self, field: str | Callable, metric: Literal['abs','real','imag','complex',''] = '') -> float | complex:
         if isinstance(field, Callable):

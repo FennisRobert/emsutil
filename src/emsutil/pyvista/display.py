@@ -26,7 +26,7 @@ from loguru import logger
 from pathlib import Path
 from importlib.resources import files
 from .utils import determine_projection_data
-from ..emdata import FieldPlotData
+from ..emdata import FieldPlotData, DataStructure
 ### Color scale
 
 # Define the colors we want to use
@@ -704,6 +704,7 @@ class EMergeDisplay:
                  cmap: cmap_names | None = None,
                  clim: tuple[float, float] | None = None,
                  opacity: float = 1.0,
+                 voltype: Literal['cloud','contour','clip'] = 'cloud',
                  symmetrize: bool = False,
                  _fieldname: str | None = None,
                  **kwargs,) -> pv.DataSet:
@@ -719,17 +720,19 @@ class EMergeDisplay:
             cmap (cmap_names | None, optional): The colormap. Defaults to None.
             clim (tuple[float, float] | None, optional): The color limit scale (min, max). Defaults to None.
             opacity (float, optional): The plot opacity. Defaults to 1.0.
+            clipplane (bool, optional): If a 3D grid plot should be done including a clip plane. Defaults to false.
             symmetrize (bool, optional): If the colorscale should be symmetrized. Defaults to False.
             _fieldname (str | None, optional): A name for the field. Defaults to None.
 
         Returns:
             pv.DataSet: _description_
         """
+
         smooth_shading = True
         if self._do_animate:
             smooth_shading = False
         
-        if field.boundary:
+        if field.structure == DataStructure.TRISURF:
             self.add_trisurf(field.x, field.y, field.z, field.F, field.tris,
                                     scale=scale,
                                     cmap=cmap,
@@ -739,9 +742,11 @@ class EMergeDisplay:
                                     _fieldname=_fieldname,
                                     smooth_shading=smooth_shading,
                                     **kwargs)
-        elif field._is_quiver:
+            return
+        if field._is_quiver:
             self.add_quiver(field.x, field.y, field.z, field.vx, field.vy, field.vz, **kwargs)
-        else:
+            return
+        if field.structure == DataStructure.GRID2D:
             self.add_surf(field.x, field.y, field.z, field.F,
                             scale=scale,
                             cmap=cmap,
@@ -751,6 +756,16 @@ class EMergeDisplay:
                             _fieldname=_fieldname,
                             smooth_shading=smooth_shading,
                             **kwargs)
+            return
+        if field.structure == DataStructure.GRID3D:
+            if voltype=='clip':
+                self.add_clip_volume(field.x, field.y, field.z, field.F, scale=scale, cmap=cmap, opacity=opacity, symmetrize=symmetrize, clim=clim, **kwargs)
+            elif voltype=='contour':
+                self.add_contour(field.x, field.y, field.z, field.F, scale=scale, cmap=cmap, opacity=opacity, symmetrize=symmetrize, clim=clim, **kwargs)
+            elif voltype=='cloud':
+                self.add_cloud(field.x, field.y, field.z, field.F, scale=scale, cmap=cmap, opacity=opacity, symmetrize=symmetrize, clim=clim, **kwargs)
+            return
+        raise Exception(f'I have no clue how to plot dataset {field} with structure {field.structure}')
     
     def add_surf(self, 
                  x: np.ndarray,
@@ -1033,8 +1048,8 @@ class EMergeDisplay:
                      symmetrize: bool = False,
                      clim: tuple[float, float] | None = None,
                      cmap: cmap_names | None = None,
-                     opacity: float = 0.8):
-        """Adds a 3D volumetric contourplot based on a 3D grid of X,Y,Z and field values
+                     opacity: float = 1.0):
+        """Adds a 3D volumetric plot with clip plane based on a 3D grid of X,Y,Z and field values
 
         Args:
             X (np.ndarray): A 3D Grid of X-values
@@ -1082,7 +1097,6 @@ class EMergeDisplay:
         
         
         self._plot.add_mesh_clip_plane(grid, opacity=opacity, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
-        #actor = self._wrap_plot(contour, opacity=opacity, cmap=cmap, clim=clim, pickable=False, scalar_bar_args=self._cbar_args)
         
         self._reset_cbar()
         
@@ -1157,6 +1171,191 @@ class EMergeDisplay:
                 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update)) # type: ignore
             self._animate_next = False
+        self._reset_cbar()
+
+    def add_cloud(self,
+                     X: np.ndarray,
+                     Y: np.ndarray,
+                     Z: np.ndarray,
+                     V: np.ndarray,
+                     scale: Literal['lin','log','symlog'] = 'lin',
+                     symmetrize: bool = True,
+                     clim: tuple[float, float] | None = None,
+                     cmap: cmap_names | None = None,
+                     opacity: float = 0.25,
+                     _fieldname: str | None = None):
+        """Adds a 3D volumetric cloud volume plot based on a 3D grid of X,Y,Z and field values
+
+        Args:
+            X (np.ndarray): A 3D Grid of X-values
+            Y (np.ndarray): A 3D Grid of Y-values
+            Z (np.ndarray): A 3D Grid of Z-values
+            V (np.ndarray): The scalar quantity to plot ()
+            symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
+            cmap (str, optional): The color map. Defaults to 'viridis'.
+        """
+        Vf = V.flatten()
+        Vf = np.nan_to_num(Vf)
+        vmin = np.min(np.real(Vf))
+        vmax = np.max(np.real(Vf))
+        
+        if _fieldname is None:
+            name = 'anim'+str(self._ctr)
+        else:
+            name = _fieldname
+        default_cmap = self.set.theme.default_amplitude_cmap
+        
+        if scale=='log':
+            T = lambda x: np.log10(np.abs(x+1e-12))
+        elif scale=='symlog':
+            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x*np.log(10)))
+        else:
+            T = lambda x: x
+        
+        if symmetrize:
+            level = np.max(np.abs(Vf))
+            vmin, vmax = (-level, level)
+            default_cmap = self.set.theme.default_wave_cmap
+            opacity_array = 256*np.abs(1 - np.cos(np.linspace(-np.pi/2, np.pi/2, 256)))#np.abs(np.linspace(-256.0, 256.0, 256))
+        else:
+            opacity_array = np.linspace(0, 256, 256)
+        
+        if clim is None:
+            if self._cbar_lim is not None:
+                clim = self._cbar_lim
+                vmin, vmax = clim
+            else:
+                clim = (vmin, vmax)
+        
+        if cmap is None:
+            cmap = default_cmap
+        else:
+            cmap = self.set.theme.parse_cmap_name(cmap)
+
+
+        x_coords = X[0, :, 0]  # Assuming X varies along first axis
+        y_coords = Y[:, 0, 0]  # Y varies along second axis
+        z_coords = Z[0, 0, :]  # Z varies along third axis
+
+        grid = pv.ImageData(dimensions=(len(x_coords), len(y_coords), len(z_coords)),
+                            spacing=(
+                                x_coords[1] - x_coords[0],
+                                y_coords[1] - y_coords[0],
+                                z_coords[1] - z_coords[0]
+                            ),
+                            origin=(x_coords[0], y_coords[0], z_coords[0]))
+        V = np.nan_to_num(V, nan=0.0)
+        field = V.transpose(1, 0, 2).flatten(order='F')
+        grid[name] = T(np.real(field))
+        
+        actor = self._plot.add_volume(grid, scalars=name, opacity=opacity_array, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
+        actor.prop.interpolation_type = 'linear'
+        
+        if self._animate_next:
+            def on_update(obj: _AnimObject, phi: complex):
+                field_anim = obj.T(np.real(obj.field * phi))
+                obj.grid[name] = field_anim
+                obj.actor.GetMapper().SetInputData(obj.grid)
+                obj.actor.GetMapper().Modified()
+                obj.actor.Modified()
+                
+            self._objs.append(_AnimObject(field, T, grid, None, actor, on_update)) # type: ignore
+            self._animate_next = False
+        self._reset_cbar()
+
+    def add_streamline(self,
+                     X: np.ndarray,
+                     Y: np.ndarray,
+                     Z: np.ndarray,
+                     vx: np.ndarray,
+                     vy: np.ndarray,
+                     vz: np.ndarray,
+                     source_points: np.ndarray | None = None,
+                     scale: Literal['lin','log','symlog'] = 'lin',
+                     clim: tuple[float, float] | None = None,
+                     cmap: cmap_names | None = None,
+                     opacity: float = 0.25,
+                     _fieldname: str | None = None):
+        """Adds a 3D volumetric cloud volume plot based on a 3D grid of X,Y,Z and field values
+
+        Args:
+            X (np.ndarray): A 3D Grid of X-values
+            Y (np.ndarray): A 3D Grid of Y-values
+            Z (np.ndarray): A 3D Grid of Z-values
+            V (np.ndarray): The scalar quantity to plot ()
+            cmap (str, optional): The color map. Defaults to 'viridis'.
+        """
+        
+        vx = vx.flatten()
+        vx = np.nan_to_num(vx)
+        vy = vy.flatten()
+        vy = np.nan_to_num(vy)
+        vz = vz.flatten()
+        vz = np.nan_to_num(vz)
+
+        norm = (np.abs(vx)**2 + np.abs(vy)**2+np.abs(vz)**2)**0.5
+        vmin = np.min(norm)
+        vmax = np.max(norm)
+        
+        if _fieldname is None:
+            name = 'anim'+str(self._ctr)
+        else:
+            name = _fieldname
+        name = 'RTData'
+        default_cmap = self.set.theme.default_amplitude_cmap
+        
+        if scale=='log':
+            T = lambda x: np.log10(np.abs(x+1e-12))
+        elif scale=='symlog':
+            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x*np.log(10)))
+        else:
+            T = lambda x: x
+        
+        
+        if clim is None:
+            if self._cbar_lim is not None:
+                clim = self._cbar_lim
+                vmin, vmax = clim
+            else:
+                clim = (vmin, vmax)
+        
+        if cmap is None:
+            cmap = default_cmap
+        else:
+            cmap = self.set.theme.parse_cmap_name(cmap)
+
+
+        x_coords = X[0, :, 0]  # Assuming X varies along first axis
+        y_coords = Y[:, 0, 0]  # Y varies along second axis
+        z_coords = Z[0, 0, :]  # Z varies along third axis
+        
+        grid = pv.ImageData(
+                            dimensions=(len(x_coords), len(y_coords), len(z_coords)),
+                            spacing=(
+                                x_coords[1] - x_coords[0],
+                                y_coords[1] - y_coords[0],
+                                z_coords[1] - z_coords[0]
+                            ),
+                            origin=(x_coords[0], y_coords[0], z_coords[0]))
+        
+        vectors = np.empty((grid.n_points, 3))
+        vectors[:, 0] = vx.flatten(order='F')
+        vectors[:, 1] = vy.flatten(order='F')
+        vectors[:, 2] = vz.flatten(order='F')
+
+        grid['vectors'] = vectors
+
+        if source_points is not None:
+            source_points = np.array(source_points)
+            if source_points.shape[1]==3:
+                source_points = source_points.T
+            source_center = np.mean(source_points,axis=1)
+            source_radius = np.max(np.linalg.norm(source_points-source_center[:, np.newaxis], axis=0))
+        else:
+            source_center = None
+            source_radius = None
+        sl = grid.streamlines('vectors',n_points=200, source_center=source_center, source_radius=source_radius)
+        actor = self._wrap_plot(sl, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
         self._reset_cbar()
         
     def _add_aux_items(self) -> None:
