@@ -463,7 +463,7 @@ class EMergeDisplay:
         self._reset_cbar()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
-        #pv.OFF_SCREEN = False
+        
     def _close_callback(self, arg):
         """The private callback function that stops the animation.
         """
@@ -619,7 +619,7 @@ class EMergeDisplay:
                             line_width=line_width, 
                             edge_color=edge_color,
                             show_edges=show_edges, 
-                            pickable=True, 
+                            pickable=False, 
                             smooth_shading=False,
                             split_sharp_edges=True,
                             style=style)
@@ -1685,6 +1685,8 @@ class ScreenSelector:
                 continue
             actor.pickable = True
 
+def _do_nothing(*args):
+    pass
         
 class ScreenRuler:
 
@@ -1695,6 +1697,7 @@ class ScreenRuler:
         self.ruler: Any = None
         self.state: bool = False
         self.min_length: float = min_length
+        self._call_coords: Callable = _do_nothing
     
     @freeze
     def toggle(self):
@@ -1740,10 +1743,10 @@ class ScreenRuler:
             self.ruler.SetTitle(f'{1000*self.dist:.2f}mm')
             x1, y1, z = self.points[0]
             x2, y2, z = self.points[1]
-            print(f'lp = pcb.lumped_port_pts(({x1:.6f},{y1:.6f}),({x2:.6f},{y2:.6f}),{z:.6f})')
+            self._call_coords(x1, y1, x2, y2, z)
     
     @freeze
     def _add_point(self, point: tuple[float, float, float]):
         self.points = [point,self.points[0]]
-        self.text = self.disp._plot.add_text(self.measurement_string, self.middle, name='RulerText')
+        self.text = self.disp._plot.add_text(self.measurement_string, position=self.middle, name='RulerText')
         self.set_ruler()
