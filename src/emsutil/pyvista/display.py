@@ -362,6 +362,7 @@ class EMergeDisplay:
         
         self._plot.off_screen = off_screen
         pv.OFF_SCREEN = off_screen
+        
         self._ruler.min_length = self._get_edge_length()
         self._update_camera()
         self._add_aux_items()
@@ -463,6 +464,7 @@ class EMergeDisplay:
         self._reset_cbar()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
+        pv.OFF_SCREEN = False
         
     def _close_callback(self, arg):
         """The private callback function that stops the animation.
@@ -471,9 +473,7 @@ class EMergeDisplay:
         self._reset()
 
     def _animate(self) -> None:
-        """Private function that starts the animation loop.
-        """
-        
+        """Private function that starts the animation loop."""
         self._stop = False
 
         # guard values
