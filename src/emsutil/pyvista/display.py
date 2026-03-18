@@ -1248,7 +1248,7 @@ class EMergeDisplay:
         field = V.transpose(1, 0, 2).flatten(order='F')
         grid[name] = T(np.real(field))
         
-        actor = self._plot.add_volume(grid, scalars=name, opacity=opacity_array, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
+        actor = self._plot.add_volume(grid, scalars=name, opacity=opacity_array, clim=clim, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args)
         actor.prop.interpolation_type = 'linear'
         
         if self._animate_next:
