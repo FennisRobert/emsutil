@@ -288,6 +288,9 @@ class EHFieldFF(Saveable):
     def normH(self) -> np.ndarray:
         return np.sqrt(np.abs(self._H[0,:])**2 + np.abs(self._H[1,:])**2 + np.abs(self._H[2,:])**2)
     
+    @property
+    def RCS(self) -> np.ndarray:
+        return 4*np.pi*self.normE**2
     
     def surfplot(self, 
              polarization: Literal['Ex','Ey','Ez','Etheta','Ephi','normE','Erhcp','Elhcp','AR'],
