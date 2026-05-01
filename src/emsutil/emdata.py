@@ -207,11 +207,11 @@ class EHFieldFF(Saveable):
         return float(r**2 * np.sum(Sr * dOmega))
     
     @property
-    def E(self) -> np.ndarray:
+    def E(self) -> FarFieldComponent:
         return FarFieldComponent(self._E, self.theta, self.phi)
     
     @property
-    def H(self) -> np.ndarray:
+    def H(self) -> FarFieldComponent:
         return FarFieldComponent(self._H, self.theta, self.phi)
     
     @property
