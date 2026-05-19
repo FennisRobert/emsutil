@@ -1702,11 +1702,14 @@ class ScreenRuler:
     @freeze
     def toggle(self):
         if not self.state:
-            self.state = True
-            self.disp._plot.enable_point_picking(self._add_point, left_clicking=True, tolerance=self.min_length)
+            self.turn_on()
         else:
-            self.state = False
-            self.disp._plot.disable_picking()
+            self.turn_off()
+
+    @freeze
+    def turn_on(self):
+        self.state = True
+        self.disp._plot.enable_point_picking(self._add_point, left_clicking=True, tolerance=self.min_length)
 
     @freeze
     def turn_off(self):
@@ -1730,7 +1733,10 @@ class ScreenRuler:
         dx = p2[0]-p1[0]
         dy = p2[1]-p1[1]
         dz = p2[2]-p1[2]
-        return f'{dist*1000:.2f}mm (dx={1000.*dx:.4f}mm, dy={1000.*dy:.4f}mm, dz={1000.*dz:.4f}mm)'
+        lines = [f"p1 = ({p1[0]*1000:.2f}, {p1[1]*1000:.2f}, {p1[2]*1000:.2f})",
+                 f"p2 = ({p2[0]*1000:.2f}, {p2[1]*1000:.2f}, {p2[2]*1000:.2f})",
+                 f'{dist*1000:.2f}mm (dx={1000.*dx:.4f}mm, dy={1000.*dy:.4f}mm, dz={1000.*dz:.4f}mm)']
+        return '\n'.join(lines)
     
     def set_ruler(self) -> None:
         if self.ruler is None:
