@@ -71,6 +71,7 @@ class MatProperty(Saveable):
         self._z = np.concatenate([self._z, z])
         
     def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
+        # Separate tensors from scalars
         data[:,:,self._apply_to] = np.repeat(self._value[:,:,np.newaxis], self._apply_to.shape[0], axis=2)
         return data
 
@@ -145,6 +146,7 @@ class FreqDependent(MatProperty, Saveable):
         self._apply_to = np.concatenate([self._apply_to, ids])
         
     def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
+        # Separate (3,3) tensors and scalars
         data[:,:,self._apply_to] = np.repeat(self._func(f)[:,:,np.newaxis], self._apply_to.shape[0], axis=2)
         return data
     
@@ -309,12 +311,16 @@ class Material(Saveable):
     """
     _pickle_exclude = {"_neff"}
     skip_fields = ("_neff",)
+    
     def __init__(self,
                  er: float | complex | np.ndarray | MatProperty = 1.0,
                  ur: float | complex | np.ndarray | MatProperty = 1.0,
                  tand: float | MatProperty = 0.0,
                  cond: float | MatProperty = 0.0,
                  _neff: float | None = None,
+                 density: float | MatProperty = 1.0,
+                 cond_thermal: float | MatProperty = 1.0,
+                 specific_heat: float | MatProperty = 1.0,
                  color: str ="#BEBEBE",
                  opacity: float = 1.0,
                  _metal: bool = False,
@@ -329,12 +335,26 @@ class Material(Saveable):
         if not isinstance(cond, MatProperty):
             cond = MatProperty(cond)
         
-        self.name: str = name
+        if not isinstance(density, MatProperty):
+            density = MatProperty(density)
+        if not isinstance(cond_thermal, MatProperty):
+            cond_thermal = MatProperty(cond_thermal)
+        if not isinstance(specific_heat, MatProperty):
+            specific_heat = MatProperty(specific_heat)
+            
+        # Electrical
         self.er: MatProperty = er
         self.ur: MatProperty = ur
         self.tand: MatProperty = tand
         self.cond: MatProperty = cond
 
+        # Thermal
+        self.density: MatProperty = density
+        self.cond_thermal: MatProperty = cond_thermal
+        self.specific_heat: MatProperty = specific_heat
+
+        # Other
+        self.name: str = name
         self.color: str = color
         self.opacity: float = opacity
         self._hash_key: int = -1
@@ -384,6 +404,10 @@ class Material(Saveable):
         self.ur.initialize(xs, ys, zs, ids)
         self.tand.initialize(xs, ys, zs, ids)
         self.cond.initialize(xs, ys, zs, ids)
+        
+        self.density.initialize(xs, ys, zs, ids)
+        self.specific_heat.initialize(xs, ys, zs, ids)
+        self.cond_thermal.initialize(xs, ys, zs, ids)
     
     def reset(self) -> None:
         """Resets assignment of material properties to coordiantes and tetrahedral indices.
@@ -392,6 +416,11 @@ class Material(Saveable):
         self.ur.reset()
         self.tand.reset()
         self.cond.reset()
+
+        self.density.reset()
+        self.specific_heat.reset()
+        self.cond_thermal.reset()
+        
         self._hash_key = -1
         
     @property
@@ -445,6 +474,9 @@ class Material(Saveable):
         fsigma = FreqDependent(scalar = lambda f: conductivity/(1 - 1j*2*np.pi*f*colission_dist))
         return Material(er, ur, 0.0, fsigma, color=color, opacity=opacity, _metal=metal)
     
-AIR = Material(color="#4496f3", opacity=0.05, name='Air')
-COPPER = Material(cond=5.8e7, color="#62290c", _metal=True, name='Copper')
-PEC = Material(color="#ff78aa", opacity=1.0, cond=1e30, _metal=True, name="PEC")
+AIR = Material(color="#4496f3", opacity=0.05, name='Air',
+               cond_thermal=0.026, density=1.225, specific_heat=1005)
+COPPER = Material(cond=5.8e7, color="#62290c", _metal=True, name='Copper',
+                  cond_thermal=401, density=8960, specific_heat=385)
+PEC = Material(color="#ff78aa", opacity=1.0, cond=1e30, _metal=True, name="PEC",
+               cond_thermal=1e30, density=8960, specific_heat=385)

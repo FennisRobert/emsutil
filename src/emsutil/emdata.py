@@ -1,10 +1,11 @@
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Literal, Callable
-from .const import Z0, EPS0
+from .const import Z0, EPS0, MU0
 from .lib import EISO, EOMNI
 from .file import Saveable
 from enum import Enum
+
 
 class DataStructure(Enum):
     NONE = 0
@@ -14,6 +15,7 @@ class DataStructure(Enum):
     TRISURF = 4
     UNSTRUCTURED = 5
 
+
 @dataclass
 class FarFieldComponent(Saveable):
     F: np.ndarray
@@ -22,48 +24,51 @@ class FarFieldComponent(Saveable):
 
     @property
     def x(self) -> np.ndarray:
-        return self.F[0,:]
-    
+        return self.F[0, :]
+
     @property
     def y(self) -> np.ndarray:
-        return self.F[1,:]
-    
+        return self.F[1, :]
+
     @property
     def z(self) -> np.ndarray:
-        return self.F[2,:]
-    
+        return self.F[2, :]
+
     @property
     def theta(self) -> np.ndarray:
-        thx = np.cos(self._th)*np.cos(self._ph)
-        thy = np.cos(self._th)*np.sin(self._ph)
+        thx = np.cos(self._th) * np.cos(self._ph)
+        thy = np.cos(self._th) * np.sin(self._ph)
         thz = -np.sin(self._th)
-        return thx*self.F[0,:] + thy*self.F[1,:] + thz*self.F[2,:]
-    
+        return thx * self.F[0, :] + thy * self.F[1, :] + thz * self.F[2, :]
+
     @property
     def phi(self) -> np.ndarray:
         phx = -np.sin(self._ph)
         phy = np.cos(self._ph)
         phz = np.zeros_like(self._th)
-        return phx*self.F[0,:] + phy*self.F[1,:] + phz*self.F[2,:]
-    
+        return phx * self.F[0, :] + phy * self.F[1, :] + phz * self.F[2, :]
+
     @property
     def rhcp(self) -> np.ndarray:
-        return (self.theta + 1j*self.phi)/np.sqrt(2)
-    
+        return (self.theta + 1j * self.phi) / np.sqrt(2)
+
     @property
     def lhcp(self) -> np.ndarray:
-        return (self.theta - 1j*self.phi)/np.sqrt(2)
-    
+        return (self.theta - 1j * self.phi) / np.sqrt(2)
+
     @property
     def AR(self) -> np.ndarray:
         R = np.abs(self.rhcp)
         L = np.abs(self.lchp)
-        return (R+L)/(R-L)
-    
+        return (R + L) / (R - L)
+
     @property
     def norm(self) -> np.ndarray:
-        return np.sqrt(np.abs(self.F[0,:])**2 + np.abs(self.F[1,:])**2 + np.abs(self.F[2,:])**2)
-
+        return np.sqrt(
+            np.abs(self.F[0, :]) ** 2
+            + np.abs(self.F[1, :]) ** 2
+            + np.abs(self.F[2, :]) ** 2
+        )
 
 
 @dataclass
@@ -71,20 +76,19 @@ class FieldPlotData(Saveable):
     x: np.ndarray
     y: np.ndarray
     z: np.ndarray
-    F: np.ndarray | None =  field(default=None)
-    tris: np.ndarray | None =  field(default=None)
+    F: np.ndarray | None = field(default=None)
+    tris: np.ndarray | None = field(default=None)
     boundary: bool = field(default=False)
     structure: DataStructure = field(default=DataStructure.NONE)
     vx: np.ndarray | None = field(default=None)
     vy: np.ndarray | None = field(default=None)
     vz: np.ndarray | None = field(default=None)
-    
-    
-    
+    name: str = "unnamed"
+
     @property
     def _is_quiver(self) -> bool:
         return self.vx is not None and self.vy is not None and self.vz is not None
-    
+
     @property
     def xyzf(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Returns the X, Y, Z, F arrays.
@@ -103,9 +107,10 @@ class FieldPlotData(Saveable):
         """
         return (self.x, self.y, self.z, self.vx, self.vy, self.vz)
 
-
     @property
-    def xyzftri(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def xyzftri(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Returns the X, Y, Z, F + triangulation arrays.
 
         Raises:
@@ -117,7 +122,7 @@ class FieldPlotData(Saveable):
         if self.tris is None:
             raise ValueError("tris is None")
         return (self.x, self.y, self.z, self.F, self.tris)
-    
+
     def __iter__(self):
         if self.vx is not None:
             yield self.x
@@ -137,7 +142,8 @@ class FieldPlotData(Saveable):
             yield self.y
             yield self.z
             yield self.F
-            
+
+
 @dataclass
 class EHFieldFF(Saveable):
     _E: np.ndarray
@@ -147,11 +153,11 @@ class EHFieldFF(Saveable):
     Ptot: float
     ang: np.ndarray | None = field(default=None)
     freq: float | None = field(default=None)
-    
+
     def total_radiated_power_integral(
         self,
         r: float = 1.0,
-        use: str = "EH",              # "EH" or "E"
+        use: str = "EH",  # "EH" or "E"
         degrees: bool | None = None,  # auto if None
     ) -> float:
         """Integrates the total radiated power from the far-field E and H fields.
@@ -171,20 +177,23 @@ class EHFieldFF(Saveable):
         if E.shape[:1] != (3,) or E.ndim != 3:
             raise ValueError(f"_E must be (3,N,M), got {E.shape}")
         if th.shape != E.shape[1:] or ph.shape != E.shape[1:]:
-            raise ValueError(f"theta/phi must be (N,M) matching _E[1:], got {th.shape}, {ph.shape}")
+            raise ValueError(
+                f"theta/phi must be (N,M) matching _E[1:], got {th.shape}, {ph.shape}"
+            )
         if use.upper() == "EH" and H.shape != E.shape:
             raise ValueError(f"_H must match _E for use='EH', got {H.shape}")
 
         if degrees is None:
-            degrees = (np.nanmax(th) > 2*np.pi + 0.5) or (np.nanmax(ph) > 2*np.pi + 0.5)
+            degrees = (np.nanmax(th) > 2 * np.pi + 0.5) or (
+                np.nanmax(ph) > 2 * np.pi + 0.5
+            )
         if degrees:
             th = np.deg2rad(th)
             ph = np.deg2rad(ph)
 
         # rhat(θ,φ)
         rhat = np.stack(
-            [np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)],
-            axis=0,
+            [np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=0
         )  # (3,N,M)
 
         # S_r
@@ -205,98 +214,117 @@ class EHFieldFF(Saveable):
         dOmega = np.sin(th) * np.abs(J)
 
         return float(r**2 * np.sum(Sr * dOmega))
-    
+
     @property
     def E(self) -> FarFieldComponent:
         return FarFieldComponent(self._E, self.theta, self.phi)
-    
+
     @property
     def H(self) -> FarFieldComponent:
         return FarFieldComponent(self._H, self.theta, self.phi)
-    
+
     @property
     def Ex(self) -> np.ndarray:
-        return self._E[0,:]
-    
+        return self._E[0, :]
+
     @property
     def Ey(self) -> np.ndarray:
-        return self._E[1,:]
-    
+        return self._E[1, :]
+
     @property
     def Ez(self) -> np.ndarray:
-        return self._E[2,:]
-    
+        return self._E[2, :]
+
     @property
     def Hx(self) -> np.ndarray:
-        return self._H[0,:]
-    
+        return self._H[0, :]
+
     @property
     def Hy(self) -> np.ndarray:
-        return self._H[1,:]
-    
+        return self._H[1, :]
+
     @property
     def Hz(self) -> np.ndarray:
-        return self._H[2,:]
-    
+        return self._H[2, :]
+
     @property
     def Etheta(self) -> np.ndarray:
-        thx = np.cos(self.theta)*np.cos(self.phi)
-        thy = np.cos(self.theta)*np.sin(self.phi)
+        thx = np.cos(self.theta) * np.cos(self.phi)
+        thy = np.cos(self.theta) * np.sin(self.phi)
         thz = -np.sin(self.theta)
-        return thx*self._E[0,:] + thy*self._E[1,:] + thz*self._E[2,:]
-    
+        return thx * self._E[0, :] + thy * self._E[1, :] + thz * self._E[2, :]
+
     @property
     def Ephi(self) -> np.ndarray:
         phx = -np.sin(self.phi)
         phy = np.cos(self.phi)
         phz = np.zeros_like(self.theta)
-        return phx*self._E[0,:] + phy*self._E[1,:] + phz*self._E[2,:]
-    
+        return phx * self._E[0, :] + phy * self._E[1, :] + phz * self._E[2, :]
+
     @property
     def Erhcp(self) -> np.ndarray:
-        return (self.Etheta + 1j*self.Ephi)/np.sqrt(2)
-    
+        return (self.Etheta + 1j * self.Ephi) / np.sqrt(2)
+
     @property
     def Elhcp(self) -> np.ndarray:
-        return (self.Etheta - 1j*self.Ephi)/np.sqrt(2)
-    
+        return (self.Etheta - 1j * self.Ephi) / np.sqrt(2)
+
     @property
     def AR(self) -> np.ndarray:
         R = np.abs(self.Erhcp)
         L = np.abs(self.Elhcp)
-        return (R+L)/(R-L)
-    
+        return (R + L) / (R - L)
+
     @property
-    def gain(self, kind: Literal['iso','omni'] = 'iso') -> FarFieldComponent:
-        if kind=='iso':
-            return FarFieldComponent(self._E/EISO, self.theta, self.phi)
+    def gain(self, kind: Literal["iso", "omni"] = "iso") -> FarFieldComponent:
+        if kind == "iso":
+            return FarFieldComponent(self._E / EISO, self.theta, self.phi)
         else:
-            return FarFieldComponent(self._E/EOMNI, self.theta, self.phi)
-        
+            return FarFieldComponent(self._E / EOMNI, self.theta, self.phi)
+
     @property
-    def dir(self, kind: Literal['iso','omni'] = 'iso') -> FarFieldComponent:
-        if kind=='iso':
-            return FarFieldComponent(self._E/(EISO*(self.Ptot)**0.5), self.theta, self.phi)
+    def dir(self, kind: Literal["iso", "omni"] = "iso") -> FarFieldComponent:
+        if kind == "iso":
+            return FarFieldComponent(
+                self._E / (EISO * (self.Ptot) ** 0.5), self.theta, self.phi
+            )
         else:
-            return FarFieldComponent(self._E/(EOMNI*(self.Ptot)**0.5), self.theta, self.phi)
-    
+            return FarFieldComponent(
+                self._E / (EOMNI * (self.Ptot) ** 0.5), self.theta, self.phi
+            )
+
     @property
     def normE(self) -> np.ndarray:
-        return np.sqrt(np.abs(self._E[0,:])**2 + np.abs(self._E[1,:])**2 + np.abs(self._E[2,:])**2)
-    
+        return np.sqrt(
+            np.abs(self._E[0, :]) ** 2
+            + np.abs(self._E[1, :]) ** 2
+            + np.abs(self._E[2, :]) ** 2
+        )
+
     @property
     def normH(self) -> np.ndarray:
-        return np.sqrt(np.abs(self._H[0,:])**2 + np.abs(self._H[1,:])**2 + np.abs(self._H[2,:])**2)
-    
+        return np.sqrt(
+            np.abs(self._H[0, :]) ** 2
+            + np.abs(self._H[1, :]) ** 2
+            + np.abs(self._H[2, :]) ** 2
+        )
+
     @property
     def RCS(self) -> np.ndarray:
-        return 4*np.pi*self.normE**2
-    
-    def surfplot(self, 
-             polarization: Literal['Ex','Ey','Ez','Etheta','Ephi','normE','Erhcp','Elhcp','AR'],
-             quantity: Literal['abs','real','imag','angle'] = 'abs',
-             isotropic: bool = True, dB: bool = False, dBfloor: float = -30, rmax: float | None = None,
-             offset: tuple[float, float, float] = (0,0,0)) -> FieldPlotData:
+        return 4 * np.pi * self.normE**2
+
+    def surfplot(
+        self,
+        polarization: Literal[
+            "Ex", "Ey", "Ez", "Etheta", "Ephi", "normE", "Erhcp", "Elhcp", "AR"
+        ],
+        quantity: Literal["abs", "real", "imag", "angle"] = "abs",
+        isotropic: bool = True,
+        dB: bool = False,
+        dBfloor: float = -30,
+        rmax: float | None = None,
+        offset: tuple[float, float, float] = (0, 0, 0),
+    ) -> FieldPlotData:
         """Returns the parameters to be used as positional arguments for the display.add_surf() function.
 
         Example:
@@ -311,33 +339,29 @@ class EHFieldFF(Saveable):
         Returns:
             FieldPlotData: The plot data object
         """
-        fmap = {
-            'abs': np.abs,
-            'real': np.real,
-            'imag': np.imag,
-            'angle': np.angle,
-        }
-        
+        fmap = {"abs": np.abs, "real": np.real, "imag": np.imag, "angle": np.angle}
+
         mapping = fmap.get(quantity.lower(), np.abs)
-        
+
         F = mapping(getattr(self, polarization))
-        
+
         if isotropic:
             F = F / np.sqrt(Z0 / (2 * np.pi))
-        
+
         if dB:
             Fabs = np.abs(F)
-            Fabs_clip = np.clip(Fabs, a_min = 10**(dBfloor/20), a_max = 1e9)
+            Fabs_clip = np.clip(Fabs, a_min=10 ** (dBfloor / 20), a_max=1e9)
             F = 20 * np.log10(Fabs_clip) - dBfloor
-        
+
         if rmax is not None:
-            F = rmax * F/np.max(F)
-        
-        xs = F*np.sin(self.theta)*np.cos(self.phi) + offset[0]
-        ys = F*np.sin(self.theta)*np.sin(self.phi) + offset[1]
-        zs = F*np.cos(self.theta) + offset[2]
+            F = rmax * F / np.max(F)
+
+        xs = F * np.sin(self.theta) * np.cos(self.phi) + offset[0]
+        ys = F * np.sin(self.theta) * np.sin(self.phi) + offset[1]
+        zs = F * np.cos(self.theta) + offset[2]
 
         return FieldPlotData(x=xs, y=ys, z=zs, F=F, structure=DataStructure.GRID2D)
+
 
 @dataclass
 class EHField(Saveable):
@@ -353,300 +377,325 @@ class EHField(Saveable):
     sig: np.ndarray | None = field(default=None)
     aux: dict[str, np.ndarray] = field(default_factory=dict)
     _Js: np.ndarray | None = field(default=None)
-    
+
     def __post_init__(self):
         if self._Js is None:
-            self._Js = self._E*0
-    
+            self._Js = self._E * 0
+
     @property
     def k0(self) -> float:
-        return self.freq*2*np.pi/299792458
-    
+        return self.freq * 2 * np.pi / 299792458
+
     @property
     def Ex(self) -> np.ndarray:
-        return self.E[0,:]
-    
+        return self.E[0, :]
+
     @property
     def Ey(self) -> np.ndarray:
-        return self.E[1,:]
-    
+        return self.E[1, :]
+
     @property
     def Ez(self) -> np.ndarray:
-        return self.E[2,:]
-    
+        return self.E[2, :]
+
     @property
     def Hx(self) -> np.ndarray:
-        return self.H[0,:]
-    
+        return self.H[0, :]
+
     @property
     def Hy(self) -> np.ndarray:
-        return self.H[1,:]
-    
+        return self.H[1, :]
+
     @property
     def Hz(self) -> np.ndarray:
-        return self.H[2,:]
-    
+        return self.H[2, :]
+
     @property
     def Jsx(self) -> np.ndarray:
-        return self._Js[0,:]
-    
+        return self._Js[0, :]
+
     @property
     def Jsy(self) -> np.ndarray:
-        return self._Js[1,:]
-    
+        return self._Js[1, :]
+
     @property
     def Jsz(self) -> np.ndarray:
-        return self._Js[2,:]
-    
+        return self._Js[2, :]
+
     @property
     def Px(self) -> np.ndarray:
-        return EPS0*(self.er-1)*self.Ex
-    
+        return EPS0 * (self.er - 1) * self.Ex
+
     @property
     def Py(self) -> np.ndarray:
-        return EPS0*(self.er-1)*self.Ey
-    
+        return EPS0 * (self.er - 1) * self.Ey
+
     @property
     def Pz(self) -> np.ndarray:
-        return EPS0*(self.er-1)*self.Ez
-    
+        return EPS0 * (self.er - 1) * self.Ez
+
     @property
     def Jvx(self) -> np.ndarray:
-        return self.Ex*self.sig
-    
+        return self.Ex * self.sig
+
     @property
     def Jvy(self) -> np.ndarray:
-        return self.Ey*self.sig
-    
+        return self.Ey * self.sig
+
     @property
     def Jvz(self) -> np.ndarray:
-        return self.Ez*self.sig
-    
+        return self.Ez * self.sig
+
     @property
     def Jv(self) -> np.ndarray:
         return np.array([self.Jvx, self.Jvy, self.Jvz])
-    
+
     @property
     def Jvxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return (self.Jvx, self.Jvy, self.Jvz)
-    
+
     @property
     def Jsxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return (self.Jsx, self.Jsy, self.Jsz)
-    
+
     @property
     def Dx(self) -> np.ndarray:
-        return self.Ex*self.er
-    
+        return self.Ex * self.er
+
     @property
     def Dy(self) -> np.ndarray:
-        return self.Ey*self.er
-    
+        return self.Ey * self.er
+
     @property
     def Dz(self) -> np.ndarray:
-        return self.Ez*self.er
-    
+        return self.Ez * self.er
+
     @property
     def Bx(self) -> np.ndarray:
-        return self.Hx/self.ur
-    
+        return self.Hx / self.ur
+
     @property
     def By(self) -> np.ndarray:
-        return self.Hy/self.ur
-    
+        return self.Hy / self.ur
+
     @property
     def Bz(self) -> np.ndarray:
-        return self.Hz/self.ur
-    
+        return self.Hz / self.ur
+
     @property
     def Emat(self) -> np.ndarray:
         return self.E
-    
+
     @property
     def Hmat(self) -> np.ndarray:
         return self.H
-    
+
     @property
     def Pmat(self) -> np.ndarray:
         return np.array([self.Px, self.Py, self.Pz])
-    
+
     @property
     def Bmat(self) -> np.ndarray:
         return np.array([self.Bx, self.By, self.Bz])
-    
+
     @property
     def Dmat(self) -> np.ndarray:
         return np.array([self.Dx, self.Dy, self.Dz])
-    
+
     @property
     def Smat(self) -> np.ndarray:
         return np.array([self.Sx, self.Sy, self.Sz])
-    
+
     @property
     def Smmat(self) -> np.ndarray:
         return np.array([self.Smx, self.Smy, self.Smz])
-    
+
     @property
     def EH(self) -> tuple[np.ndarray, np.ndarray]:
-        ''' Return the electric and magnetic field as a tuple of numpy arrays '''
+        """Return the electric and magnetic field as a tuple of numpy arrays"""
         return self.E, self
-    
+
     @property
     def E(self) -> np.ndarray:
-        ''' Return the electric field as a numpy array '''
+        """Return the electric field as a numpy array"""
         return self._E
-    
+
     @property
     def H(self) -> np.ndarray:
-        ''' Return the magnetic field as a numpy array '''
+        """Return the magnetic field as a numpy array"""
         return self._H
-    
+
     @property
     def Exyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the electric field as a tuple of numpy arrays '''
+        """Return the electric field as a tuple of numpy arrays"""
         return self.Ex, self.Ey, self.Ez
-    
+
     @property
     def Sx(self) -> np.ndarray:
-        return self.Ey*self.Hz - self.Ez*self.Hy
-    
+        return self.Ey * self.Hz - self.Ez * self.Hy
+
     @property
     def Sy(self) -> np.ndarray:
-        return self.Ez*self.Hx - self.Ex*self.Hz
-    
+        return self.Ez * self.Hx - self.Ex * self.Hz
+
     @property
     def Sz(self) -> np.ndarray:
-        return self.Ex*self.Hy - self.Ey*self.Hx
-    
+        return self.Ex * self.Hy - self.Ey * self.Hx
+
     @property
     def Smx(self) -> np.ndarray:
-        return 0.5*(self.Ey*np.conj(self.Hz) - self.Ez*np.conj(self.Hy))
-    
+        return 0.5 * (self.Ey * np.conj(self.Hz) - self.Ez * np.conj(self.Hy))
+
     @property
     def Smy(self) -> np.ndarray:
-        return 0.5*(self.Ez*np.conj(self.Hx) - self.Ex*np.conj(self.Hz))
-    
+        return 0.5 * (self.Ez * np.conj(self.Hx) - self.Ex * np.conj(self.Hz))
+
     @property
     def Smz(self) -> np.ndarray:
-        return 0.5*(self.Ex*np.conj(self.Hy) - self.Ey*np.conj(self.Hx))
-    
+        return 0.5 * (self.Ex * np.conj(self.Hy) - self.Ey * np.conj(self.Hx))
+
     @property
     def B(self) -> np.ndarray:
-        ''' Return the magnetic field as a numpy array '''
+        """Return the magnetic field as a numpy array"""
         return np.array([self.Bx, self.By, self.Bz])
-    
+
     @property
     def Bxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the magnetic field as a tuple of numpy arrays '''
+        """Return the magnetic field as a tuple of numpy arrays"""
         return self.Bx, self.By, self.Bz
-    
+
     @property
     def Pxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the polarization field as a tuple of numpy arrays '''
+        """Return the polarization field as a tuple of numpy arrays"""
         return self.Px, self.Py, self.Pz
 
     @property
     def P(self) -> np.ndarray:
-        ''' Return the polarization field as a numpy array '''
+        """Return the polarization field as a numpy array"""
         return np.array([self.Px, self.Py, self.Pz])
-    
+
     @property
     def D(self) -> np.ndarray:
-        ''' Return the electric displacement field as a numpy array '''
+        """Return the electric displacement field as a numpy array"""
         return np.array([self.Dx, self.Dy, self.Dz])
-    
+
     @property
     def Js(self) -> np.ndarray:
         return self._Js
-    
+
     @property
     def Dxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the electric displacement field as a tuple of numpy arrays '''
+        """Return the electric displacement field as a tuple of numpy arrays"""
         return self.Dx, self.Dy, self.Dz
 
     @property
     def Hxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the magnetic field as a tuple of numpy arrays '''
+        """Return the magnetic field as a tuple of numpy arrays"""
         return self.Hx, self.Hy, self.Hz
 
     @property
     def S(self) -> np.ndarray:
-        ''' Return the poynting vector field as a numpy array '''
+        """Return the poynting vector field as a numpy array"""
         return np.array([self.Sx, self.Sy, self.Sz])
-    
+
     @property
     def Sxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the poynting vector field as a tuple of numpy arrays '''
+        """Return the poynting vector field as a tuple of numpy arrays"""
         return self.Sx, self.Sy, self.Sz
-    
+
     @property
     def Sm(self) -> np.ndarray:
-        ''' Return the poynting vector field as a numpy array '''
+        """Return the poynting vector field as a numpy array"""
         return np.array([self.Smx, self.Smy, self.Smz])
-    
+
     @property
     def Smxyz(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return the poynting vector field as a tuple of numpy arrays '''
+        """Return the poynting vector field as a tuple of numpy arrays"""
         return self.Smx, self.Smy, self.Smz
-    
+
     @property
     def normE(self) -> np.ndarray:
-        """The complex norm of the E-field
-        """
-        return np.sqrt(np.abs(self.Ex)**2 + np.abs(self.Ey)**2 + np.abs(self.Ez)**2)
-    
+        """The complex norm of the E-field"""
+        return np.sqrt(
+            np.abs(self.Ex) ** 2 + np.abs(self.Ey) ** 2 + np.abs(self.Ez) ** 2
+        )
+
     @property
     def normH(self) -> np.ndarray:
         """The complex norm of the H-field"""
-        return np.sqrt(np.abs(self.Hx)**2 + np.abs(self.Hy)**2 + np.abs(self.Hz)**2)
-    
+        return np.sqrt(
+            np.abs(self.Hx) ** 2 + np.abs(self.Hy) ** 2 + np.abs(self.Hz) ** 2
+        )
+
     @property
     def normP(self) -> np.ndarray:
-        """The complex norm of the P-field
-        """
-        return np.sqrt(np.abs(self.Px)**2 + np.abs(self.Py)**2 + np.abs(self.Pz)**2)
-    
+        """The complex norm of the P-field"""
+        return np.sqrt(
+            np.abs(self.Px) ** 2 + np.abs(self.Py) ** 2 + np.abs(self.Pz) ** 2
+        )
+
     @property
     def normB(self) -> np.ndarray:
-        """The complex norm of the B-field
-        """
-        return np.sqrt(np.abs(self.Bx)**2 + np.abs(self.By)**2 + np.abs(self.Bz)**2)
-    
+        """The complex norm of the B-field"""
+        return np.sqrt(
+            np.abs(self.Bx) ** 2 + np.abs(self.By) ** 2 + np.abs(self.Bz) ** 2
+        )
+
     @property
     def normD(self) -> np.ndarray:
-        """The complex norm of the D-field
-        """
-        return np.sqrt(np.abs(self.Dx)**2 + np.abs(self.Dy)**2 + np.abs(self.Dz)**2)
-    
+        """The complex norm of the D-field"""
+        return np.sqrt(
+            np.abs(self.Dx) ** 2 + np.abs(self.Dy) ** 2 + np.abs(self.Dz) ** 2
+        )
+
     @property
     def normJv(self) -> np.ndarray:
-        return np.sqrt(np.abs(self.Jvx)**2 + np.abs(self.Jvy)**2 + np.abs(self.Jvz)**2)
-    
+        return np.sqrt(
+            np.abs(self.Jvx) ** 2 + np.abs(self.Jvy) ** 2 + np.abs(self.Jvz) ** 2
+        )
+
     @property
     def normJs(self) -> np.ndarray:
-        return np.sqrt(np.abs(self.Jsx)**2 + np.abs(self.Jsy)**2 + np.abs(self.Jsz)**2)
-    
+        return np.sqrt(
+            np.abs(self.Jsx) ** 2 + np.abs(self.Jsy) ** 2 + np.abs(self.Jsz) ** 2
+        )
+
     @property
     def normS(self) -> np.ndarray:
-        """The complex norm of the S-field
-        """
-        return np.sqrt(np.abs(self.Sx)**2 + np.abs(self.Sy)**2 + np.abs(self.Sz)**2)
-    
+        """The complex norm of the S-field"""
+        return np.sqrt(
+            np.abs(self.Sx) ** 2 + np.abs(self.Sy) ** 2 + np.abs(self.Sz) ** 2
+        )
+
+    @property
+    def Qv(self) -> np.ndarray:
+        """The total volumetric power dissipation"""
+        w = 2 * np.pi * self.freq
+        Qv = (
+            -0.5 * w * self.er.imag * EPS0 * self.normE**2
+            - 1 / 2 * w * MU0 * self.ur.imag * self.normH**2
+        )
+        return Qv
+
     def _get_quantity(self, field: str, metric: str) -> np.ndarray:
         field_arry = getattr(self, field)
-        if metric=='abs':
+        if metric == "abs":
             field = np.abs(field_arry)
-        elif metric=='real':
+        elif metric == "real":
             field = field_arry.real
-        elif metric=='imag':
+        elif metric == "imag":
             field = field_arry.imag
-        elif metric=='complex':
+        elif metric == "complex":
             field = field_arry
         else:
             field = field_arry
         return field
-    
-    def vector(self, field: Literal['E','H'], metric: Literal['real','imag','complex'] = 'real') -> FieldPlotData:
+
+    def vector(
+        self,
+        field: Literal["E", "H"],
+        metric: Literal["real", "imag", "complex"] = "real",
+    ) -> FieldPlotData:
         """Returns the X,Y,Z,Fx,Fy,Fz data to be directly cast into plot functions.
 
         The field can be selected by a string literal. The metric of the complex vector field by the metric.
@@ -660,17 +709,28 @@ class EHField(Saveable):
             FieldPlotData: The plot data object
         """
         Fx, Fy, Fz = getattr(self, field)
-        
-        
-        if metric=='real':
+
+        if metric == "real":
             Fx, Fy, Fz = Fx.real, Fy.real, Fz.real
-        elif metric=='imag':
+        elif metric == "imag":
             Fx, Fy, Fz = Fx.imag, Fy.imag, Fz.imag
-        
-        return FieldPlotData(x=self.x, y=self.y, z=self.z, vx=Fx, vy=Fy, vz=Fz, structure=self.structure)
-    
-    
-    def scalar(self, field: Literal['Ex','Ey','Ez','Hx','Hy','Hz','normE','normH'] | str, metric: Literal['abs','real','imag','complex'] = 'real') -> FieldPlotData:
+
+        return FieldPlotData(
+            x=self.x,
+            y=self.y,
+            z=self.z,
+            vx=Fx,
+            vy=Fy,
+            vz=Fz,
+            structure=self.structure,
+            name=f"{metric} {field}",
+        )
+
+    def scalar(
+        self,
+        field: Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "normE", "normH"] | str,
+        metric: Literal["abs", "real", "imag", "complex"] = "real",
+    ) -> FieldPlotData:
         """Returns the data X, Y, Z, Field based on the interpolation
 
         For animations, make sure to select the complex metric.
@@ -682,33 +742,53 @@ class EHField(Saveable):
         Returns:
             FieldPlotData: The plot data object
         """
+        fieldname = field
         if field in self.aux:
             field_arry = self.aux[field]
         else:
             field_arry = getattr(self, field)
-        
-        if metric=='abs':
-            field = np.abs(field_arry)
-        elif metric=='real':
-            field = field_arry.real
-        elif metric=='imag':
-            field = field_arry.imag
-        elif metric=='complex':
-            field = field_arry
-        
-        
-        if 'boundary' not in self.aux:
-            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, structure=self.structure)
-        else:
-            return FieldPlotData(x=self.x, y=self.y, z=self.z, F=field_arry, tris=self.aux['tris'], structure=self.structure, boundary=True)
 
-    def int(self, field: str | Callable, metric: Literal['abs','real','imag','complex',''] = '') -> float | complex:
+        if metric == "abs":
+            field = np.abs(field_arry)
+        elif metric == "real":
+            field = field_arry.real
+        elif metric == "imag":
+            field = field_arry.imag
+        elif metric == "complex":
+            field = field_arry
+
+        if "boundary" not in self.aux:
+            return FieldPlotData(
+                x=self.x,
+                y=self.y,
+                z=self.z,
+                F=field_arry,
+                structure=self.structure,
+                name=f"{metric} {fieldname}",
+            )
+        else:
+            return FieldPlotData(
+                x=self.x,
+                y=self.y,
+                z=self.z,
+                F=field_arry,
+                tris=self.aux["tris"],
+                structure=self.structure,
+                boundary=True,
+                name=f"{metric} {fieldname}",
+            )
+
+    def int(
+        self,
+        field: str | Callable,
+        metric: Literal["abs", "real", "imag", "complex", ""] = "",
+    ) -> float | complex:
         if isinstance(field, Callable):
             field = field(self)
         else:
             field = self._get_quantity(field, metric)
-        if len(field.shape)==2:
+        if len(field.shape) == 2:
             axis = 1
         else:
             axis = 0
-        return np.sum(field*self.aux['areas']*self.aux['weights'], axis=axis)
+        return np.sum(field * self.aux["areas"] * self.aux["weights"], axis=axis)
