@@ -78,7 +78,6 @@ def nanminmax(arr):
 
 
 class _RunState:
-
     def __init__(self):
         self.state: bool = False
         self.ctr: int = 0
@@ -219,7 +218,6 @@ class _AnimObject:
 
 
 class EMergeDisplay:
-
     def __init__(self, *args, **kwargs):
 
         self.set: PVDisplaySettings = PVDisplaySettings()
@@ -510,7 +508,9 @@ class EMergeDisplay:
         if self._bwdrawing:
             self._plot.set_background("white", top="white")  # type: ignore
         else:
-            self._plot.set_background(self.set.theme.backgroung_grad_1, top=self.set.theme.backgroung_grad_2)  # type: ignore
+            self._plot.set_background(
+                self.set.theme.backgroung_grad_1, top=self.set.theme.backgroung_grad_2
+            )  # type: ignore
 
     def _reset(self):
         self._ctr = 0
@@ -706,7 +706,6 @@ class EMergeDisplay:
             kwargs["silhouette"] = dict(color="black", line_width=3.0)
 
         if texture is not None and texture != "None":
-
             tex_image = self._get_texture(texture)
             if tex_image is not None:
                 kwargs["texture"] = tex_image
@@ -829,7 +828,14 @@ class EMergeDisplay:
             return
         if field._is_quiver:
             self.add_quiver(
-                field.x, field.y, field.z, field.vx, field.vy, field.vz, **kwargs
+                field.x,
+                field.y,
+                field.z,
+                field.vx,
+                field.vy,
+                field.vz,
+                scalemode=scale,
+                **kwargs,
             )
             return
         if field.structure == DataStructure.GRID2D:
@@ -1189,18 +1195,14 @@ class EMergeDisplay:
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         x, y, z, dx, dy, dz = x[ids], y[ids], z[ids], dx[ids], dy[ids], dz[ids]
+        if scalemode == "log":
+            dx, dy, dz = _logscale(dx, dy, dz)
 
         dmin = _min_distance(x, y, z)
-
         dmax = np.max(_norm(dx, dy, dz))
 
         Vec = scale * np.array([dx, dy, dz]).T / dmax * dmin
         Coo = np.array([x, y, z]).T
-        if scalemode == "log":
-            dx, dy, dz = _logscale(Vec[:, 0], Vec[:, 1], Vec[:, 2])
-            Vec[:, 0] = dx
-            Vec[:, 1] = dy
-            Vec[:, 2] = dz
 
         kwargs = dict()
         if color is not None:
@@ -1739,7 +1741,6 @@ class EMergeDisplay:
 
         # XY grid at Z=0
         if self.set.theme.draw_zgrid:
-
             # lines parallel to X
             for y in y_vals:
                 line = pv.Line(pointa=(xmin, y, zmin), pointb=(xmax, y, zmin))
@@ -1766,7 +1767,6 @@ class EMergeDisplay:
 
         # YZ grid at X=0
         if self.set.theme.draw_xgrid:
-
             # lines parallel to Y
             for z in z_vals:
                 line = pv.Line(pointa=(xmin, ymin, z), pointb=(xmin, ymax, z))
@@ -1793,7 +1793,6 @@ class EMergeDisplay:
 
         # XZ grid at Y=0
         if self.set.theme.draw_ygrid:
-
             # lines parallel to X
             for z in z_vals:
                 line = pv.Line(pointa=(xmin, ymin, z), pointb=(xmax, ymin, z))
@@ -1848,7 +1847,6 @@ def freeze(function):
 
 
 class ScreenSelector:
-
     def __init__(self, display: EMergeDisplay):
         self.encoder: Callable | None = None
         self.disp: EMergeDisplay = display
@@ -1945,7 +1943,6 @@ def _do_nothing(*args):
 
 
 class ScreenRuler:
-
     def __init__(self, display: EMergeDisplay, min_length: float):
         self.disp: EMergeDisplay = display
         self.points: list[tuple] = [(0, 0, 0), (0, 0, 0)]
@@ -1994,21 +1991,23 @@ class ScreenRuler:
         dy = p2[1] - p1[1]
         dz = p2[2] - p1[2]
         lines = [
-            f"p1 = ({p1[0]*1000:.2f}, {p1[1]*1000:.2f}, {p1[2]*1000:.2f})",
-            f"p2 = ({p2[0]*1000:.2f}, {p2[1]*1000:.2f}, {p2[2]*1000:.2f})",
-            f"{dist*1000:.2f}mm (dx={1000.*dx:.4f}mm, dy={1000.*dy:.4f}mm, dz={1000.*dz:.4f}mm)",
+            f"p1 = ({p1[0] * 1000:.2f}, {p1[1] * 1000:.2f}, {p1[2] * 1000:.2f})",
+            f"p2 = ({p2[0] * 1000:.2f}, {p2[1] * 1000:.2f}, {p2[2] * 1000:.2f})",
+            f"{dist * 1000:.2f}mm (dx={1000.0 * dx:.4f}mm, dy={1000.0 * dy:.4f}mm, dz={1000.0 * dz:.4f}mm)",
         ]
         return "\n".join(lines)
 
     def set_ruler(self) -> None:
         if self.ruler is None:
-            self.ruler = self.disp._plot.add_ruler(self.points[0], self.points[1], title=f"{1000*self.dist:.2f}mm")  # type: ignore
+            self.ruler = self.disp._plot.add_ruler(
+                self.points[0], self.points[1], title=f"{1000 * self.dist:.2f}mm"
+            )  # type: ignore
         else:
             p1 = self.ruler.GetPositionCoordinate()
             p2 = self.ruler.GetPosition2Coordinate()
             p1.SetValue(*self.points[0])
             p2.SetValue(*self.points[1])
-            self.ruler.SetTitle(f"{1000*self.dist:.2f}mm")
+            self.ruler.SetTitle(f"{1000 * self.dist:.2f}mm")
             x1, y1, z = self.points[0]
             x2, y2, z = self.points[1]
             self._call_coords(x1, y1, x2, y2, z)
