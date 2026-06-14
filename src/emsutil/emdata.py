@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Literal, Callable
@@ -86,6 +88,10 @@ class FieldPlotData(Saveable):
     name: str = "unnamed"
 
     @property
+    def clim(self) -> tuple[float, float]:
+        return (min(self.F.flatten()), max(self.F.flatten()))
+
+    @property
     def _is_quiver(self) -> bool:
         return self.vx is not None and self.vy is not None and self.vz is not None
 
@@ -122,6 +128,27 @@ class FieldPlotData(Saveable):
         if self.tris is None:
             raise ValueError("tris is None")
         return (self.x, self.y, self.z, self.F, self.tris)
+
+    def smooth(self, sigma: float = 1.0) -> FieldPlotData:
+        import scipy.ndimage as ndimage
+
+        field_nd = self.F
+        nan_mask = np.isnan(field_nd)
+        valid_mask = (~nan_mask).astype(float)
+
+        field_zeroed = np.nan_to_num(field_nd, nan=0.0)
+        smoothed_field = ndimage.gaussian_filter(field_zeroed, sigma=sigma)
+        smoothed_mask = ndimage.gaussian_filter(valid_mask, sigma=sigma)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            normalized_field = smoothed_field / smoothed_mask
+            normalized_field = np.nan_to_num(normalized_field, nan=0.0)
+
+        # 5. Re-apply the original NaN mask to restore the boundaries
+        normalized_field[nan_mask] = np.nan
+
+        self.F = normalized_field
+        return self
 
     def __iter__(self):
         if self.vx is not None:
@@ -316,10 +343,19 @@ class EHFieldFF(Saveable):
     def surfplot(
         self,
         polarization: Literal[
-            "Ex", "Ey", "Ez", "Etheta", "Ephi", "normE", "Erhcp", "Elhcp", "AR"
+            "Ex",
+            "Ey",
+            "Ez",
+            "Etheta",
+            "Ephi",
+            "normE",
+            "Erhcp",
+            "Elhcp",
+            "AR",
+            "gain",
+            "dir",
         ],
         quantity: Literal["abs", "real", "imag", "angle"] = "abs",
-        isotropic: bool = True,
         dB: bool = False,
         dBfloor: float = -30,
         rmax: float | None = None,
@@ -332,7 +368,6 @@ class EHFieldFF(Saveable):
 
         Args:
             polarization ('Ex','Ey','Ez','Etheta','Ephi','normE'): What quantity to plot
-            isotropic (bool, optional): Whether to look at the ratio with isotropic antennas. Defaults to True.
             dB (bool, optional): Whether to plot in dB's. Defaults to False.
             dBfloor (float, optional): The dB value to take as R=0. Defaults to -10.
 
@@ -343,24 +378,42 @@ class EHFieldFF(Saveable):
 
         mapping = fmap.get(quantity.lower(), np.abs)
 
-        F = mapping(getattr(self, polarization))
+        # Unpack the polarization
+        comps = polarization.split(".")  # example: gain.x -> ("gain", "x")
+        base = self
 
-        if isotropic:
-            F = F / np.sqrt(Z0 / (2 * np.pi))
+        # Iteratively grab attributes of the next object based
+        for comp in comps:
+            base = getattr(base, comp)
+        if isinstance(base, FarFieldComponent):
+            base = base.norm
 
+        F = mapping(base)
+
+        plot_quantity = F
         if dB:
             Fabs = np.abs(F)
+            plot_quantity = 20 * np.log10(plot_quantity)
             Fabs_clip = np.clip(Fabs, a_min=10 ** (dBfloor / 20), a_max=1e9)
             F = 20 * np.log10(Fabs_clip) - dBfloor
 
         if rmax is not None:
-            F = rmax * F / np.max(F)
+            R = rmax * F / np.max(F)
+        else:
+            R = F
 
-        xs = F * np.sin(self.theta) * np.cos(self.phi) + offset[0]
-        ys = F * np.sin(self.theta) * np.sin(self.phi) + offset[1]
-        zs = F * np.cos(self.theta) + offset[2]
+        xs = R * np.sin(self.theta) * np.cos(self.phi) + offset[0]
+        ys = R * np.sin(self.theta) * np.sin(self.phi) + offset[1]
+        zs = R * np.cos(self.theta) + offset[2]
 
-        return FieldPlotData(x=xs, y=ys, z=zs, F=F, structure=DataStructure.GRID2D)
+        return FieldPlotData(
+            x=xs,
+            y=ys,
+            z=zs,
+            F=plot_quantity,
+            structure=DataStructure.GRID2D,
+            name=f"{polarization} ({quantity})",
+        )
 
 
 @dataclass

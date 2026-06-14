@@ -28,6 +28,7 @@ from importlib.resources import files
 from .utils import determine_projection_data
 from ..emdata import FieldPlotData, DataStructure
 
+
 ### Color scale
 
 # Define the colors we want to use
@@ -75,6 +76,57 @@ cmap_names = Literal[
 def nanminmax(arr):
     valid = arr[~np.isnan(arr)]
     return valid.min(), valid.max()
+
+
+# Data processing
+
+from scipy.spatial import KDTree
+
+
+def _min_distance(xs, ys, zs):
+    """Finds the single smallest distance between any two points in a point cloud
+
+    using an efficient O(N log N) KD-Tree approach.
+
+    Parameters:
+    -----------
+    points : np.ndarray
+        An (N, 2) or (N, 3) array of coordinates.
+
+    Returns:
+    --------
+    float
+        The minimum distance between the two closest points in the dataset.
+    """
+    points = np.array([xs, ys, zs]).T
+
+    if len(points) < 2:
+        return 0.0
+
+    tree = KDTree(points)
+    distances, _ = tree.query(points, k=2)
+
+    closest_neighbor_distances = distances[:, 1]
+    return float(np.min(closest_neighbor_distances))
+
+
+def get_transformation(scale: Literal["log", "symlog", "lin"]) -> Callable:
+    """Return a transformation callable to transform a scalar
+    dataset according to a log, symmetric-log or linear scale.
+
+    Args:
+        scale (Literal[&quot;log&quot;, &quot;symlog&quot;, &quot;lin&quot;]): _description_
+
+    Returns:
+        Callable: _description_
+    """
+    if scale == "log":
+        T = lambda x: np.log10(np.abs(x + 1e-12))
+    elif scale == "symlog":
+        T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
+    else:
+        T = lambda x: x
+    return T
 
 
 class _RunState:
@@ -160,34 +212,6 @@ def _logscale(dx, dy, dz):
     return scaled_dx, scaled_dy, scaled_dz
 
 
-def _min_distance(xs, ys, zs):
-    """
-    Compute the minimum Euclidean distance between any two points
-    defined by the 1D arrays xs, ys, zs.
-
-    Parameters:
-        xs (np.ndarray): x-coordinates of the points
-        ys (np.ndarray): y-coordinates of the points
-        zs (np.ndarray): z-coordinates of the points
-
-    Returns:
-        float: The minimum Euclidean distance between any two points
-    """
-    # Stack the coordinates into a (N, 3) array
-    points = np.stack((xs, ys, zs), axis=-1)
-
-    # Compute pairwise squared distances using broadcasting
-    diff = points[:, np.newaxis, :] - points[np.newaxis, :, :]
-    dists_squared = np.sum(diff**2, axis=-1)
-
-    # Set diagonal to infinity to ignore zero distances to self
-    np.fill_diagonal(dists_squared, np.inf)
-
-    # Get the minimum distance
-    min_dist = np.sqrt(np.min(dists_squared))
-    return min_dist
-
-
 def _norm(x, y, z):
     return np.sqrt(np.abs(x) ** 2 + np.abs(y) ** 2 + np.abs(z) ** 2)
 
@@ -245,10 +269,21 @@ class EMergeDisplay:
         self._isometric: bool = False
         self._bwdrawing: bool = False
 
+        self.highlight_actor = None
+        self.highlight_text_actor = None
+        self._cycle_pos: int = 0
+        self._obj_cycler: list[str] = []
+        self._selectable_objects: dict[str:dict] = dict()
+
         self._bounds: tuple[float, float, float, float, float, float] | None = None
         self._cbar_args: dict = {}
         self._cbar_lim: tuple[float, float] | None = None
         self.camera_position = (1, -1, 1)  # +X, +Z, -Y
+
+        self._plot.track_click_position(
+            callback=self._on_click, side="right", viewport=True
+        )
+
         self.__post_init__(*args, **kwargs)
 
     def __post_init__(self, *args, **kwargs):
@@ -256,6 +291,41 @@ class EMergeDisplay:
 
     def _get_edge_length(self) -> float:
         return 1.0
+
+    @staticmethod
+    def _def_if_none(value, default):
+        if value is None:
+            return default
+        return value
+
+    def parse_opacity(
+        self, value: float | str | None, default: float | str, minimize: bool = False
+    ) -> float:
+        """Picks the provided value or parses the default. If minimize is true it will pick the lowest of the value and the default opacity.
+
+        Args:
+            value (float | str): The opacity as float, string or even None
+            default (float | str): The default value
+            minimize (bool, optional): If the output should be the minimum of both. Defaults to False.
+
+        Returns:
+            float: _description_
+        """
+        default = self.set.theme.parse_opacity(default)
+        if value is None:
+            return default
+        if minimize:
+            return min(self.set.theme.parse_opacity(value), default)
+        else:
+            return self.set.theme.parse_opacity(value)
+
+    @staticmethod
+    def _awd(values: dict, default: dict) -> dict:
+        """Append with default. Overwrites detault dict entries with values"""
+        out = dict()
+        out.update(default)
+        out.update(values)
+        return out
 
     ############################################################
     #                        GENERIC METHODS                   #
@@ -268,12 +338,46 @@ class EMergeDisplay:
         interactive: bool = False,
         clim: tuple[float, float] | None = None,
     ) -> EMergeDisplay:
-        self._cbar_args = dict(title=name, n_labels=n_labels, interactive=interactive)
+
+        self._cbar_args = dict(
+            title=name,
+            n_labels=n_labels,
+            interactive=interactive,
+            title_font_size=26,
+            label_font_size=25,
+            unconstrained_font_size=True,
+        )
         self._cbar_lim = clim
         return self
 
+    def _cbar_defaults(self, **kwargs):
+        """overwrite Defaults kwargs for _cbar_args."""
+        defaults = dict(
+            title_font_size=26,
+            label_font_size=24,
+            color=self.set.theme.text_color,
+            unconstrained_font_size=True,
+        )
+        defaults.update(kwargs)
+
+        self._cbar_args = self._awd(self._cbar_args, defaults)
+
     def _wrap_plot(self, *args, **kwargs) -> pv.Actor:
+        """Performs plot operations to handle Pyvistas behavior better"""
+
+        # Scalar bars are handled separately in order to make font size changes work
+        if "scalar_bar_args" in kwargs and kwargs.get("show_scalar_bar", True):
+            sbarargs = kwargs.pop("scalar_bar_args")
+        else:
+            sbarargs = None
+
+        # Make the plot call without scalar bar
+        kwargs["show_scalar_bar"] = False
         actor = self._plot.add_mesh(*args, **kwargs)
+
+        # Add the scalar bar separately.
+        if sbarargs is not None:
+            self._plot.add_scalar_bar(**sbarargs)
         self._data_sets.append(actor.mapper.dataset)
         return actor
 
@@ -307,6 +411,15 @@ class EMergeDisplay:
         px, py, pz = px / dp, py / dp, pz / dp
         self._plot.camera.position = (d * px, d * py, d * pz)
 
+    def _apply_lighting(self) -> None:
+        # Applies default lighting
+        lights = []
+
+        lights.append(pv.Light(position=(-1, 1, 1), color="white", intensity=0.3))
+        lights.append(pv.Light(position=(1, -1, -1), color="white", intensity=0.3))
+        for light in lights:
+            self._plot.add_light(light)
+
     def _generate_plotter(self) -> None:
         self._plot = pv.Plotter()
 
@@ -317,6 +430,102 @@ class EMergeDisplay:
         self._plot.add_key_event("z", self.view_z)  # type: ignore
         self._plot.add_key_event("c", self.toggle_isometric)  # type: ignore
         self._plot.add_key_event("i", self.view_iso)
+        self._plot.add_key_event("Right", self._on_next_obj)
+        self._plot.add_key_event("Left", self._on_prev_obj)
+
+    def _on_click(self, click_pos):
+        x, y = click_pos
+
+        # Get the underlying VTK renderer
+        renderer = self._plot.renderer
+
+        # Convert the 2D screen click into a 3D point on the near clipping plane
+        renderer.SetDisplayPoint(x, y, 0.0)
+        renderer.DisplayToWorld()
+        ray_start = np.array(renderer.GetWorldPoint()[:3])
+
+        # Convert the 2D screen click into a 3D point on the far clipping plane
+        renderer.SetDisplayPoint(x, y, 1.0)
+        renderer.DisplayToWorld()
+        ray_end = np.array(renderer.GetWorldPoint()[:3])
+
+        hits = []
+        for name, info in self._selectable_objects.items():
+            mesh = info["mesh"]
+            actor = info["actor"]
+            if not isinstance(mesh, pv.PolyData):
+                surface = mesh.extract_surface(algorithm="dataset_surface")
+            else:
+                surface = mesh
+
+            points, cells = surface.ray_trace(ray_start, ray_end)
+            if len(points) > 0:
+                point = points[0, :]
+                distance = np.linalg.norm(point - ray_start)
+                hits.append((distance, name))
+
+        hits.sort(key=lambda x: x[0])
+
+        self._cycle_pos = 0
+        self._obj_cycler = []
+        if hits:
+            for dist, name in hits:
+                print(f" -> {name} (distance: {dist:.2f})")
+                self._obj_cycler.append(name)
+
+        self._highlight_object()
+
+    def _on_prev_obj(self):
+        self._cycle_pos += 1
+        self._highlight_object()
+
+    def _on_next_obj(self):
+        self._cycle_pos -= 1
+        self._highlight_object()
+
+    def _clear_highlight(self) -> None:
+        "Clears the highlightable objects and selection text."
+        if self.highlight_actor is not None:
+            self._plot.remove_actor(self.highlight_actor)
+            self.highlight_actor = None
+
+        if self.highlight_text_actor is not None:
+            self._plot.remove_actor(self.highlight_text_actor)
+            self.highlight_text_actor = None
+
+    def _highlight_object(self) -> None:
+        """Removes the old highlight and draws a new glowing edge outline around the selected mesh."""
+
+        if len(self._obj_cycler) == 0:
+            return
+
+        name = self._obj_cycler[self._cycle_pos % len(self._obj_cycler)]
+        mesh_data = self._selectable_objects[name]["mesh"]
+
+        self._clear_highlight()
+
+        if mesh_data is not None:
+            # 2. Extract edges to create a wireframe outline outline
+            # For UnstructuredGrids, extract_surface ensures extract_edges works perfectly
+            surface = (
+                mesh_data.extract_surface(algorithm="dataset_surface")
+                if not isinstance(mesh_data, pv.PolyData)
+                else mesh_data
+            )
+
+            self.highlight_actor = self._plot.add_mesh(
+                surface,
+                style="surface",
+                color=self.set.theme.parse_color_name("EMERGE-SELECT"),
+                line_width=5,  # Makes lines look thicker and cleaner
+                opacity=self.parse_opacity(
+                    "EMERGE-SELECT", self.set.theme.default_opacity
+                ),
+            )
+            self.highlight_text_actor = self.add_text(name, position="upper_edge")
+
+        # 4. Force the plotter to re-render the scene immediately
+        self._plot.render()
 
     ############################################################
     #                      KEY PRESS EVENTS                    #
@@ -472,6 +681,8 @@ class EMergeDisplay:
             self._plot.disable_shadows()
             # Turn off directional lighting
             self._plot.remove_all_lights()
+        else:
+            self._apply_lighting()
 
         if self.set.theme.draw_pvgrid and not self._bwdrawing:
             pv.set_plot_theme("dark")
@@ -495,6 +706,7 @@ class EMergeDisplay:
             )
 
         pv.global_theme.font.color = self.set.theme.text_color
+        pv.global_theme.font.size = self.set.theme.text_size
         pv.global_theme.colorbar_horizontal.width = 0.4
         pv.global_theme.colorbar_vertical.height = 0.15
 
@@ -505,6 +717,7 @@ class EMergeDisplay:
         else:
             self._plot.disable_anti_aliasing()
         self._plot.title = "EMerge"
+
         if self._bwdrawing:
             self._plot.set_background("white", top="white")  # type: ignore
         else:
@@ -516,6 +729,7 @@ class EMergeDisplay:
         self._ctr = 0
         self._plot.close()
         self._generate_plotter()
+        self._clear_highlight()
         self._stop = False
         self._objs = []
         self._animate_next = False
@@ -524,6 +738,9 @@ class EMergeDisplay:
         self._reset_cbar()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
+        self._cycle_pos: int = 0
+        self._obj_cycler: list[str] = []
+        self._selectable_objects: dict[str:dict] = dict()
         pv.OFF_SCREEN = False
 
     def _close_callback(self, arg):
@@ -627,6 +844,10 @@ class EMergeDisplay:
         points[:, 2] += self.set.z_boost
         return pv.UnstructuredGrid(cells, celltypes, points)
 
+    def _add_selectable(self, mesh: pv.UnstructuredGrid, actor: pv.Actor, name: str):
+        """Add a mesh and actor as selectable item."""
+        self._selectable_objects[name] = dict(mesh=mesh, actor=actor)
+
     def _add_obj(
         self,
         mesh_obj: pv.UnstructuredGrid,
@@ -643,29 +864,41 @@ class EMergeDisplay:
         opacity: float = 1.0,
         show_edges: bool = None,
         texture: str | None = None,
+        allow_pbr: bool = True,
+        smooth_shading: bool = False,
         **kwargs,
-    ):
+    ) -> pv.Actor:
 
         style = self.set.theme.render_style
-        color = self.set.theme.parse_color(color)
+        color = self.set.theme.parse_color_name(color)
+        opacity = self.set.theme.parse_opacity(opacity)
 
+        # Default rendering settings
+        specular = self.set.theme.render_specular
+        diffuse = self.set.theme.render_diffuse
+        ambient = self.set.theme.render_ambient
+        edge_color = self.set.theme.geo_mesh_color
+
+        # If no metallic render style is explicitly specified, pick the theme choice
         if metallic is None:
             metallic = self.set.theme.render_metal_roughness
 
+        # Same for line width
         if line_width is None:
             line_width = self.set.theme.geo_mesh_width
 
+        # Same for edge color
         if color is None:
             color = self.set.theme.geo_edge_color
 
+        # Same for show edges
         if show_edges is None:
             show_edges = self.set.theme.render_mesh
 
-        edge_color = self.set.theme.geo_mesh_color
-
-        if metal and self.set.theme.render_metal:
-            pbr = True
-            metallic = 0.8
+        # If Physics based rendering is allowed
+        if metal and self.set.theme.render_pbr:
+            pbr = allow_pbr
+            metallic = self.set.theme.render_metallic
             roughness = self.set.theme.render_metal_roughness
         else:
             pbr = False
@@ -678,6 +911,8 @@ class EMergeDisplay:
             style = "wireframe"
             color = next(self.set.theme.line_cycler)
 
+        # Don't know why I made this but in case, you can specify a minimum
+        # rendering opacity
         opacity = max(self.set.theme.render_min_opacity, opacity)
 
         # Defining the default keyword arguments for PyVista
@@ -692,11 +927,15 @@ class EMergeDisplay:
             edge_color=edge_color,
             show_edges=show_edges,
             pickable=False,
-            smooth_shading=False,
+            smooth_shading=smooth_shading,
             split_sharp_edges=True,
+            specular=specular,
+            ambient=ambient,
+            diffuse=diffuse,
             style=style,
         )
 
+        # Treat as black and white
         if not self._colorize:
             kwargs["pbr"] = False
             kwargs["roughness"] = 0.0
@@ -705,6 +944,7 @@ class EMergeDisplay:
             kwargs["color"] = (1, 1, 1)
             kwargs["silhouette"] = dict(color="black", line_width=3.0)
 
+        # Add a texture if it is specified
         if texture is not None and texture != "None":
             tex_image = self._get_texture(texture)
             if tex_image is not None:
@@ -718,9 +958,30 @@ class EMergeDisplay:
                     origin=origin, point_u=origin + u, point_v=origin + v, inplace=True
                 )
 
+        # Replace the mesh object with an edge mesh object.
         if plot_mesh is True and volume_mesh is True:
             mesh_obj = mesh_obj.extract_all_edges()
 
+        # If Physics based rendering is active and edges are desired
+        # make a separate plot call for the edges.
+        if kwargs["pbr"] and kwargs["show_edges"]:
+            kwargs2 = kwargs.copy()
+            kwargs2["style"] = "wireframe"
+            kwargs2["pbr"] = False
+            kwargs2["show_edges"] = False
+            kwargs2["color"] = edge_color
+            kwargs2["edge_color"] = edge_color
+            kwargs2["line_width"] = 1
+            kwargs2["lighting"] = True
+            kwargs2["ambient"] = 0.6
+            kwargs2["opacity"] = opacity
+            kwargs2["render_lines_as_tubes"] = False
+
+            kwargs["show_edges"] = False
+
+            actor = self._wrap_plot(mesh_obj, *args, **kwargs2)
+
+        # Finally plot the mesh object.
         actor = self._wrap_plot(mesh_obj, *args, **kwargs)
 
         # Push 3D Geometries back to avoid Z-fighting with 2D geometries.
@@ -728,6 +989,8 @@ class EMergeDisplay:
             mapper = actor.GetMapper()
             mapper.SetResolveCoincidentTopology(1)
             mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1, 0.5)
+
+        return actor
 
     ############################################################
     #                        EMERGE METHODS                    #
@@ -778,6 +1041,7 @@ class EMergeDisplay:
         clim: tuple[float, float] | None = None,
         opacity: float = None,
         voltype: Literal["cloud", "contour", "clip"] = "cloud",
+        clim_crop_factor: float = 1.0,
         symmetrize: bool = False,
         _fieldname: str | None = None,
         **kwargs,
@@ -795,6 +1059,7 @@ class EMergeDisplay:
             clim (tuple[float, float] | None, optional): The color limit scale (min, max). Defaults to None.
             opacity (float, optional): The plot opacity. Defaults to 1.0.
             clipplane (bool, optional): If a 3D grid plot should be done including a clip plane. Defaults to false.
+            clim_crop_factor (float, optional): A multiplier for the default clim limits. If this value is 0.5, the clim limits will be divided by half to zoom in on the color range.
             symmetrize (bool, optional): If the colorscale should be symmetrized. Defaults to False.
             _fieldname (str | None, optional): A name for the field. Defaults to None.
 
@@ -821,6 +1086,7 @@ class EMergeDisplay:
                 clim=clim,
                 opacity=opacity,
                 symmetrize=symmetrize,
+                clim_crop_factor=clim_crop_factor,
                 _fieldname=_fieldname,
                 smooth_shading=smooth_shading,
                 **kwargs,
@@ -849,6 +1115,7 @@ class EMergeDisplay:
                 clim=clim,
                 opacity=opacity,
                 symmetrize=symmetrize,
+                clim_crop_factor=clim_crop_factor,
                 _fieldname=_fieldname,
                 smooth_shading=smooth_shading,
                 **kwargs,
@@ -865,6 +1132,7 @@ class EMergeDisplay:
                     cmap=cmap,
                     opacity=opacity,
                     symmetrize=symmetrize,
+                    clim_crop_factor=clim_crop_factor,
                     clim=clim,
                     _fieldname=_fieldname,
                     **kwargs,
@@ -879,6 +1147,7 @@ class EMergeDisplay:
                     cmap=cmap,
                     opacity=opacity,
                     symmetrize=symmetrize,
+                    clim_crop_factor=clim_crop_factor,
                     clim=clim,
                     _fieldname=_fieldname,
                     **kwargs,
@@ -893,6 +1162,7 @@ class EMergeDisplay:
                     cmap=cmap,
                     opacity=opacity,
                     symmetrize=symmetrize,
+                    clim_crop_factor=clim_crop_factor,
                     clim=clim,
                     _fieldname=_fieldname,
                     **kwargs,
@@ -911,8 +1181,9 @@ class EMergeDisplay:
         scale: Literal["lin", "log", "symlog"] = "lin",
         cmap: cmap_names | None = None,
         clim: tuple[float, float] | None = None,
-        opacity: float = 1.0,
+        opacity: float | None = None,
         symmetrize: bool = False,
+        clim_crop_factor: float = 1.0,
         _fieldname: str | None = None,
         **kwargs,
     ) -> pv.DataSet:
@@ -932,61 +1203,70 @@ class EMergeDisplay:
 
         (¹): lin: f(x)=x, log: f(x)=log₁₀(|x|), symlog: f(x)=sgn(x)·log₁₀(1+|x·ln(10)|)
         """
-
-        grid = pv.StructuredGrid(x, y, z)
-        field_flat = field.flatten(order="F")
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        static_field = T(np.real(field_flat))
-
+        # Extract the fieldname
         if _fieldname is None:
             name = self._get_fieldname()
         else:
             name = _fieldname
 
+        # Create the structured grid objects
+        grid = pv.StructuredGrid(x, y, z)
+        field_flat = field.flatten(order="F")
+
+        # Generate and transform the dataset
+        T = get_transformation(scale)
+        static_field = T(np.real(field_flat))
+
+        # Set the scalar field as grid and apply a NaN removal
+        # Nans are used to remove plots outside the simulation domain.
         grid[name] = static_field
         grid_no_nan = grid.threshold(scalars=name, all_scalars=True)
+
+        # Get the default colormap
         default_cmap = self.set.theme.default_amplitude_cmap
+
         # Determine color limits
         if clim is None:
             if self._cbar_lim is not None:
                 clim = self._cbar_lim
             else:
-                fmin = np.nanmin(static_field)
-                fmax = np.nanmax(static_field)
+                fmin = np.nanmin(static_field) * clim_crop_factor
+                fmax = np.nanmax(static_field) * clim_crop_factor
                 clim = (fmin, fmax)
 
+        # Make the color limit symmetrical and pick the
+        # default symmetrical colormap
         if symmetrize:
             lim = max(abs(clim[0]), abs(clim[1]))
             clim = (-lim, lim)
             default_cmap = self.set.theme.default_wave_cmap
 
+        # If no cmap is provided, pick the default.
         if cmap is None:
             cmap = default_cmap
         else:
             cmap = self.set.theme.parse_cmap_name(cmap)
 
-        # Make sure that thresholded cells that are nan are not plotted grey but invisible
-
+        # Set default plot argument settings
         kwargs = setdefault(
             kwargs,
             cmap=cmap,
             clim=clim,
-            opacity=opacity,
+            opacity=self.parse_opacity(opacity, "EMERGE-SURF"),
             pickable=False,
             multi_colors=True,
         )
+        kwargs = self._awd(kwargs, self.set.theme.surf_kwargs)
 
+        # Overwrite the color bar Title if no title exists
+        self._cbar_defaults(title=name)
+
+        # Generate the plot
         actor = self._wrap_plot(
             grid_no_nan, scalars=name, scalar_bar_args=self._cbar_args, **kwargs
         )
 
+        # Animation settings
         if self._animate_next:
 
             def on_update(obj: _AnimObject, phi: complex):
@@ -1015,6 +1295,7 @@ class EMergeDisplay:
         clim: tuple[float, float] | None = None,
         opacity: float = 1.0,
         symmetrize: bool = False,
+        clim_crop_factor: float = 1.0,
         _fieldname: str | None = None,
         **kwargs,
     ):
@@ -1067,8 +1348,8 @@ class EMergeDisplay:
             if self._cbar_lim is not None:
                 clim = self._cbar_lim
             else:
-                fmin = np.nanmin(static_field)
-                fmax = np.nanmax(static_field)
+                fmin = np.nanmin(static_field) * clim_crop_factor
+                fmax = np.nanmax(static_field) * clim_crop_factor
                 clim = (fmin, fmax)
 
         if symmetrize:
@@ -1089,6 +1370,9 @@ class EMergeDisplay:
             pickable=False,
             multi_colors=True,
         )
+        self._awd(kwargs, self.set.theme.surf_kwargs)
+
+        self._cbar_defaults(title=name)
         actor = self._wrap_plot(
             grid,
             scalars=name,
@@ -1119,7 +1403,7 @@ class EMergeDisplay:
     def add_text(
         self,
         text: str,
-        color: str = "black",
+        color: str = "EMERGE-TEXT",
         position: Literal[
             "lower_left",
             "lower_right",
@@ -1150,10 +1434,16 @@ class EMergeDisplay:
             viewport = True
         else:
             final_position = position
-
-        self._plot.add_text(
-            text, position=final_position, color=color, font_size=18, viewport=viewport
+        kwargs = self.set.theme.text_kwarg
+        actor = self._plot.add_text(
+            text,
+            position=final_position,
+            color=self.set.theme.parse_color_name(color),
+            font_size=18,
+            viewport=viewport,
+            **kwargs,
         )
+        return actor
 
     def add_quiver(
         self,
@@ -1167,6 +1457,7 @@ class EMergeDisplay:
         color: tuple[float, float, float] | None = None,
         cmap: cmap_names | None = None,
         scalemode: Literal["lin", "log"] = "lin",
+        _fieldname: str = "",
     ):
         """Add a quiver plot to the display
 
@@ -1201,15 +1492,30 @@ class EMergeDisplay:
         dmin = _min_distance(x, y, z)
         dmax = np.max(_norm(dx, dy, dz))
 
-        Vec = scale * np.array([dx, dy, dz]).T / dmax * dmin
-        Coo = np.array([x, y, z]).T
+        Vec = scale * np.array([dx, dy, dz]) / dmax * dmin * 2
 
         kwargs = dict()
-        if color is not None:
-            kwargs["color"] = color
 
-        pl = self._plot.add_arrows(
-            Coo, Vec, scalars=None, clim=None, cmap=cmap, **kwargs
+        if color is not None:
+            kwargs["color"] = self.set.theme.parse_color_name(color)
+            kwargs["show_scalar_bar"] = False
+
+        self._cbar_defaults(title=_fieldname)
+
+        arrow_obj = pv.Arrow(**self.set.theme.quiver_kwargs)
+        grid = pv.StructuredGrid(x, y, z)
+        grid.point_data["vectors"] = np.column_stack(Vec)
+        grid.set_active_vectors("vectors")
+        arrows = grid.glyph(
+            orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5
+        )
+
+        pl = self._wrap_plot(
+            arrows,
+            clim=None,
+            cmap=cmap,
+            scalar_bar_args=self._cbar_args,
+            **kwargs,
         )
         self._data_sets.append(pl.mapper.dataset)
         self._reset_cbar()
@@ -1222,6 +1528,7 @@ class EMergeDisplay:
         V: np.ndarray,
         scale: Literal["lin", "log", "symlog"] = "lin",
         symmetrize: bool = False,
+        clim_crop_factor: float = 1.0,
         clim: tuple[float, float] | None = None,
         cmap: cmap_names | None = None,
         opacity: float = 1.0,
@@ -1239,8 +1546,8 @@ class EMergeDisplay:
         """
         Vf = V.flatten()
         Vf = np.nan_to_num(Vf)
-        vmin = np.min(np.real(Vf))
-        vmax = np.max(np.real(Vf))
+        vmin = np.min(np.real(Vf)) * clim_crop_factor
+        vmax = np.max(np.real(Vf)) * clim_crop_factor
 
         default_cmap = self.set.theme.default_amplitude_cmap
 
@@ -1271,6 +1578,7 @@ class EMergeDisplay:
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
         grid["anim"] = T(np.real(field))
+        kwargs = self.set.theme.surf_kwargs
 
         self._plot.add_mesh_clip_plane(
             grid,
@@ -1278,6 +1586,7 @@ class EMergeDisplay:
             cmap=cmap,
             pickable=False,
             scalar_bar_args=self._cbar_args,
+            **kwargs,
         )
 
         self._reset_cbar()
@@ -1291,6 +1600,7 @@ class EMergeDisplay:
         Nlevels: int = 5,
         scale: Literal["lin", "log", "symlog"] = "lin",
         symmetrize: bool = True,
+        clim_crop_factor: float = 1.0,
         clim: tuple[float, float] | None = None,
         cmap: cmap_names | None = None,
         opacity: float = 0.25,
@@ -1308,6 +1618,8 @@ class EMergeDisplay:
         """
         Vf = V.flatten()
         vmin, vmax = nanminmax(Vf.real)
+        vmin = vmin * clim_crop_factor
+        vmax = vmax * clim_crop_factor
 
         Vf = np.nan_to_num(Vf)
 
@@ -1321,7 +1633,7 @@ class EMergeDisplay:
             T = lambda x: x
 
         if symmetrize:
-            level = np.max(np.abs(Vf))
+            level = np.max(np.abs(T(Vf)))
             vmin, vmax = (-level, level)
             default_cmap = self.set.theme.default_wave_cmap
 
@@ -1344,6 +1656,8 @@ class EMergeDisplay:
         levels = list(np.linspace(vmin, vmax, Nlevels))
         contour = grid.contour(isosurfaces=levels)
 
+        kwargs = self.set.theme.contour_kwargs
+
         actor = self._wrap_plot(
             contour,
             opacity=opacity,
@@ -1351,6 +1665,7 @@ class EMergeDisplay:
             clim=clim,
             pickable=False,
             scalar_bar_args=self._cbar_args,
+            **kwargs,
         )
 
         if self._animate_next:
@@ -1373,6 +1688,7 @@ class EMergeDisplay:
         V: np.ndarray,
         scale: Literal["lin", "log", "symlog"] = "lin",
         symmetrize: bool = True,
+        clim_crop_factor: float = 1.0,
         clim: tuple[float, float] | None = None,
         cmap: cmap_names | None = None,
         opacity: float | None = None,
@@ -1388,8 +1704,12 @@ class EMergeDisplay:
             symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
+
         Vf = V.flatten()
         vmin, vmax = nanminmax(Vf.real)
+        vmin = vmin * clim_crop_factor
+        vmax = vmax * clim_crop_factor
+
         Vf = np.nan_to_num(Vf)
 
         if _fieldname is None:
@@ -1408,7 +1728,7 @@ class EMergeDisplay:
 
         if opacity is None:
             if symmetrize:
-                level = np.max(np.abs(Vf))
+                level = np.max(np.abs(T(Vf))) * clim_crop_factor
                 vmin, vmax = (-level, level)
                 default_cmap = self.set.theme.default_wave_cmap
                 opacity_array = 256 * np.abs(
@@ -1448,6 +1768,9 @@ class EMergeDisplay:
         field = V.transpose(1, 0, 2).flatten(order="F")
         grid[name] = T(np.real(field))
 
+        self._cbar_defaults(title=name)
+        kwargs = self.set.theme.cloud_kwargs
+
         actor = self._plot.add_volume(
             grid,
             scalars=name,
@@ -1456,6 +1779,7 @@ class EMergeDisplay:
             cmap=cmap,
             pickable=False,
             scalar_bar_args=self._cbar_args,
+            **kwargs,
         )
         actor.prop.interpolation_type = "linear"
 
@@ -1483,6 +1807,7 @@ class EMergeDisplay:
         source_points: np.ndarray | None = None,
         scale: Literal["lin", "log", "symlog"] = "lin",
         clim: tuple[float, float] | None = None,
+        clim_crop_factor: float = 1.0,
         cmap: cmap_names | None = None,
         opacity: float = 0.25,
         _fieldname: str | None = None,
@@ -1505,8 +1830,8 @@ class EMergeDisplay:
         vz = np.nan_to_num(vz)
 
         norm = (np.abs(vx) ** 2 + np.abs(vy) ** 2 + np.abs(vz) ** 2) ** 0.5
-        vmin = np.min(norm)
-        vmax = np.max(norm)
+        vmin = np.min(norm) * clim_crop_factor
+        vmax = np.max(norm) * clim_crop_factor
 
         if _fieldname is None:
             name = self._get_fieldname()
@@ -1573,9 +1898,16 @@ class EMergeDisplay:
             source_center=source_center,
             source_radius=source_radius,
         )
+        self._cbar_defaults(title=name)
+        kwargs = self.set.theme.streamline_kwarg
+
         actor = self._wrap_plot(
-            sl, cmap=cmap, pickable=False, scalar_bar_args=self._cbar_args
+            sl,
+            cmap=cmap,
+            pickable=False,
+            scalar_bar_args=self._cbar_args**kwargs,
         )
+
         self._reset_cbar()
 
     def _add_aux_items(self) -> None:
@@ -1599,7 +1931,6 @@ class EMergeDisplay:
             col_y = "black"
             col_z = "black"
 
-        # self._plot.add_logo_widget('src/_img/logo.jpeg',position=(0.89,0.89), size=(0.1,0.1))
         bounds = self._plot.bounds
         self._bounds = bounds
 
@@ -1698,39 +2029,74 @@ class EMergeDisplay:
                 pickable=False,
             )
         # Draw X-axis
+        tlrat = 0.05
+        srrat = 0.001
+        trad = 0.006
+        lrat = 1.1
         if self.set.theme.draw_xax:
-            x_line = pv.Line(pointa=(-length, 0, 0), pointb=(length, 0, 0))
+            x_line = pv.Arrow(
+                start=(0, 0, 0),
+                direction=(length * lrat, 0, 0),
+                shaft_radius=srrat,
+                tip_length=tlrat,
+                tip_radius=trad,
+                scale="auto",
+            )
             self._plot.add_mesh(
-                x_line, color=col_x, line_width=self.set.axis_line_width, pickable=False
+                x_line,
+                color=col_x,
+                ambient=0.5,
+                line_width=self.set.axis_line_width,
+                pickable=False,
             )
 
         # Draw Y-axis
         if self.set.theme.draw_yax:
-            y_line = pv.Line(pointa=(0, -length, 0), pointb=(0, length, 0))
+            y_line = pv.Arrow(
+                start=(0, 0, 0),
+                direction=(0, length * lrat, 0),
+                shaft_radius=srrat,
+                tip_length=tlrat,
+                tip_radius=trad,
+                scale="auto",
+            )
             self._plot.add_mesh(
-                y_line, color=col_y, line_width=self.set.axis_line_width, pickable=False
+                y_line,
+                color=col_y,
+                ambient=0.5,
+                line_width=self.set.axis_line_width,
+                pickable=False,
             )
 
         # Draw Z-axis
         if self.set.theme.draw_zax:
-            z_line = pv.Line(pointa=(0, 0, -length), pointb=(0, 0, length))
+            z_line = pv.Arrow(
+                start=(0, 0, 0),
+                direction=(0, 0, length * lrat),
+                tip_length=tlrat,
+                shaft_radius=srrat,
+                tip_radius=trad,
+                scale="auto",
+            )
             self._plot.add_mesh(
-                z_line, color=col_z, line_width=self.set.axis_line_width, pickable=False
+                z_line,
+                color=col_z,
+                ambient=0.5,
+                line_width=self.set.axis_line_width,
+                pickable=False,
             )
 
         exponent = np.floor(np.log10(length))
         gs = 10**exponent
-
-        nextra = 1
 
         Nxmin, Nxmax, Nymin, Nymax, Nzmin, Nzmax = [
             np.sign(val) * max(1, np.ceil(np.abs(val) / gs))
             for val in [xmin, xmax, ymin, ymax, zmin, zmax]
         ]
 
-        x_vals = np.arange(Nxmin, Nxmax + 1) * gs
-        y_vals = np.arange(Nymin, Nymax + 1) * gs
-        z_vals = np.arange(Nzmin, Nzmax + 1) * gs
+        x_vals = np.arange(Nxmin, (Nxmax + 1)) * gs
+        y_vals = np.arange(Nymin, (Nymax + 1)) * gs
+        z_vals = np.arange(Nzmin, (Nzmax + 1)) * gs
 
         xmin = Nxmin * gs
         xmax = Nxmax * gs
@@ -1739,15 +2105,20 @@ class EMergeDisplay:
         zmin = Nzmin * gs
         zmax = Nzmax * gs
 
+        def get_mult(val: float) -> float:
+            if abs(val) < 1e-9:
+                return 2.0
+            return 1.0
+
         # XY grid at Z=0
         if self.set.theme.draw_zgrid:
             # lines parallel to X
             for y in y_vals:
-                line = pv.Line(pointa=(xmin, y, zmin), pointb=(xmax, y, zmin))
+                line = pv.Line(pointa=(xmin, y, 0), pointb=(xmax, y, 0))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(y),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,
@@ -1755,11 +2126,11 @@ class EMergeDisplay:
 
             # lines parallel to Y
             for x in x_vals:
-                line = pv.Line(pointa=(x, ymin, zmin), pointb=(x, ymax, zmin))
+                line = pv.Line(pointa=(x, ymin, 0), pointb=(x, ymax, 0))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(x),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,
@@ -1769,11 +2140,11 @@ class EMergeDisplay:
         if self.set.theme.draw_xgrid:
             # lines parallel to Y
             for z in z_vals:
-                line = pv.Line(pointa=(xmin, ymin, z), pointb=(xmin, ymax, z))
+                line = pv.Line(pointa=(0, ymin, z), pointb=(0, ymax, z))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(z),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,
@@ -1781,11 +2152,11 @@ class EMergeDisplay:
 
             # lines parallel to Z
             for y in y_vals:
-                line = pv.Line(pointa=(xmin, y, zmin), pointb=(xmin, y, zmax))
+                line = pv.Line(pointa=(0, y, zmin), pointb=(0, y, zmax))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(y),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,
@@ -1795,11 +2166,11 @@ class EMergeDisplay:
         if self.set.theme.draw_ygrid:
             # lines parallel to X
             for z in z_vals:
-                line = pv.Line(pointa=(xmin, ymin, z), pointb=(xmax, ymin, z))
+                line = pv.Line(pointa=(xmin, 0, z), pointb=(xmax, 0, z))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(z),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,
@@ -1807,11 +2178,11 @@ class EMergeDisplay:
 
             # lines parallel to Z
             for x in x_vals:
-                line = pv.Line(pointa=(x, ymin, zmin), pointb=(x, ymin, zmax))
+                line = pv.Line(pointa=(x, 0, zmin), pointb=(x, 0, zmax))
                 self._plot.add_mesh(
                     line,
                     color=self.set.theme.grid_color,
-                    line_width=self.set.theme.grid_width,
+                    line_width=self.set.theme.grid_width * get_mult(x),
                     opacity=0.5,
                     edge_opacity=0.5,
                     pickable=False,

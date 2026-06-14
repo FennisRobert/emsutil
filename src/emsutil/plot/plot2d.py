@@ -1,18 +1,22 @@
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as tck
-from typing import (
-    Union, Sequence, Callable, List, Optional, Tuple
-)
+from typing import Union, Sequence, Callable, List, Optional, Tuple
 from cycler import cycler
 
-#_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+# _colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-EMERGE_COLORS = ["#1A14CE", "#D54A09", "#1F82A6", "#D3107B", "#119D40"]
+EMERGE_COLORS = [
+    "#4052ff",
+    "#ff5a2e",
+    "#47b706",
+    "#a23df2",
+    "#2800a5",
+    "#e6308a",
+    "#e89a08",
+]
 EMERGE_CYCLER = cycler(color=EMERGE_COLORS)
-plt.rc('axes', prop_cycle=EMERGE_CYCLER)
+plt.rc("axes", prop_cycle=EMERGE_CYCLER)
 
 ggplot_styles = {
     "axes.edgecolor": "000000",
@@ -36,7 +40,8 @@ ggplot_styles = {
 
 plt.rcParams.update(ggplot_styles)
 
-def _gen_grid(xs: tuple, ys: tuple, N = 201) -> list[tuple[np.ndarray, np.ndarray]]:
+
+def _gen_grid(xs: tuple, ys: tuple, N=201) -> list[tuple[np.ndarray, np.ndarray]]:
     """Generate a grid of lines for the Smith Chart
 
     Args:
@@ -46,23 +51,26 @@ def _gen_grid(xs: tuple, ys: tuple, N = 201) -> list[tuple[np.ndarray, np.ndarra
 
     Returns:
         list[np.ndarray]: List of lines
-    """    
-    xgrid = np.arange(xs[0], xs[1]+xs[2], xs[2])
-    ygrid = np.arange(ys[0], ys[1]+ys[2], ys[2])
-    xsmooth = np.logspace(np.log10(xs[0]+1e-8), np.log10(xs[1]), N)
-    ysmooth = np.logspace(np.log10(ys[0]+1e-8), np.log10(ys[1]), N)
+    """
+    xgrid = np.arange(xs[0], xs[1] + xs[2], xs[2])
+    ygrid = np.arange(ys[0], ys[1] + ys[2], ys[2])
+    xsmooth = np.logspace(np.log10(xs[0] + 1e-8), np.log10(xs[1]), N)
+    ysmooth = np.logspace(np.log10(ys[0] + 1e-8), np.log10(ys[1]), N)
     ones = np.ones((N,))
     lines = []
     for x in xgrid:
-        lines.append((x*ones, ysmooth))
-        lines.append((x*ones, -ysmooth))
+        lines.append((x * ones, ysmooth))
+        lines.append((x * ones, -ysmooth))
     for y in ygrid:
-        lines.append((xsmooth, y*ones))
-        lines.append((xsmooth, -y*ones))
-        
+        lines.append((xsmooth, y * ones))
+        lines.append((xsmooth, -y * ones))
+
     return lines
 
-def _generate_grids(orders = (0, 0.5, 1, 2, 5, 10, 50,1e5), N=201) -> list[tuple[np.ndarray, np.ndarray]]:
+
+def _generate_grids(
+    orders=(0, 0.5, 1, 2, 5, 10, 50, 1e5), N=201
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Generate the grid for the Smith Chart
 
     Args:
@@ -71,15 +79,18 @@ def _generate_grids(orders = (0, 0.5, 1, 2, 5, 10, 50,1e5), N=201) -> list[tuple
 
     Returns:
         list[tuple[np.ndarray, np.ndarray]]: List of axes lines
-    """    
+    """
     lines = []
     xgrids = orders
     for o1, o2 in zip(xgrids[:-1], xgrids[1:]):
-        step = o2/10
-        lines += _gen_grid((0, o2, step), (0, o2, step), N)   
+        step = o2 / 10
+        lines += _gen_grid((0, o2, step), (0, o2, step), N)
     return lines
 
-def _smith_transform(lines: list[tuple[np.ndarray, np.ndarray]]) -> list[tuple[np.ndarray, np.ndarray]]:
+
+def _smith_transform(
+    lines: list[tuple[np.ndarray, np.ndarray]],
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Executes the Smith Transform on a list of lines
 
     Args:
@@ -87,16 +98,17 @@ def _smith_transform(lines: list[tuple[np.ndarray, np.ndarray]]) -> list[tuple[n
 
     Returns:
         list[tuple[np.ndarray, np.ndarray]]: List of transformed lines
-    """    
+    """
     new_lines = []
     for line in lines:
         x, y = line
-        z = x + 1j*y
-        new_z = (z-1)/(z+1)
+        z = x + 1j * y
+        new_z = (z - 1) / (z + 1)
         new_x = new_z.real
         new_y = new_z.imag
         new_lines.append((new_x, new_y))
     return new_lines
+
 
 def hintersections(x: np.ndarray, y: np.ndarray, level: float) -> list[float]:
     """Find the intersections of a line with a level
@@ -108,7 +120,7 @@ def hintersections(x: np.ndarray, y: np.ndarray, level: float) -> list[float]:
 
     Returns:
         list[float]: List of x-values where the intersection occurs
-    """      
+    """
     y1 = y[:-1] - level
     y2 = y[1:] - level
     ycross = y1 * y2
@@ -123,7 +135,6 @@ def hintersections(x: np.ndarray, y: np.ndarray, level: float) -> list[float]:
     xcross = list(-b / a)
     xlevel = list(x[np.where(y == level)])
     return xcross + xlevel
-
 
 
 def plot(
@@ -141,7 +152,7 @@ def plot(
     transformation: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
 ) -> None:
     """
     Plot one or more y‐series against a common x‐axis, with extensive formatting options.
@@ -190,11 +201,14 @@ def plot(
     # Prepare labels, linestyles, markers
     if labels is not None and len(labels) != n_series:
         raise ValueError("`labels` length must match number of y‐series")
+
     # Turn single styles into lists of length n_series
     def _broadcast(param, default):
         if isinstance(param, list):
             if len(param) != n_series:
-                raise ValueError(f"List length of `{param}` must match number of series")
+                raise ValueError(
+                    f"List length of `{param}` must match number of series"
+                )
             return param
         else:
             return [param] * n_series
@@ -204,17 +218,18 @@ def plot(
 
     # Apply transformation if given
     if transformation is not None:
-        y_list = [trans(y_i) for trans, y_i in zip([transformation]*n_series, y_list)]
+        y_list = [trans(y_i) for trans, y_i in zip([transformation] * n_series, y_list)]
 
     # Create plot
     fig, ax = plt.subplots()
     for i, y_i in enumerate(y_list):
         ax.plot(
-            x, y_i,
+            x,
+            y_i,
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],
-            label=(labels[i] if labels is not None else None)
+            label=(labels[i] if labels is not None else None),
         )
 
     # Axes scales
@@ -242,6 +257,7 @@ def plot(
 
     plt.show()
 
+
 def smith(
     S: np.ndarray | Sequence[np.ndarray],
     f: Optional[np.ndarray | Sequence[np.ndarray]] = None,
@@ -251,46 +267,46 @@ def smith(
     title: Optional[str] = None,
     linewidth: Optional[Union[float, Sequence[Optional[float]]]] = None,
     n_flabels: int = 8,
-    funit: str = 'GHz'
+    funit: str = "GHz",
 ) -> None:
     """Plot S-parameter traces on a Smith chart with optional per-trace styling
-and sparse frequency annotations (e.g., labeled by frequency).
+    and sparse frequency annotations (e.g., labeled by frequency).
 
-    Args:
-    S (np.ndarray | Sequence[np.ndarray]): One or more 1D complex arrays of
-        reflection coefficients (Γ) to plot (each shaped like (N,)).
-    f (Optional[np.ndarray  |  Sequence[np.ndarray]], optional): Frequency
-        vector(s) aligned with `S` for sparse on-curve labels; provide a
-        single array for all traces or one array per trace. Defaults to None.
-    colors (Optional[Union[str, Sequence[Optional[str]]]], optional): Color
-        for all traces or a sequence of per-trace colors. Defaults to None
-        (uses Matplotlib’s color cycle).
-    markers (Optional[Union[str, Sequence[str]]], optional): Marker style
-        for all traces or per-trace markers. Defaults to None (treated as 'none').
-    labels (Optional[Union[str, Sequence[str]]], optional): Legend label for
-        all traces or a sequence of per-trace labels. If omitted, no legend
-        is shown. Defaults to None.
-    title (Optional[str], optional): Axes title. Defaults to None.
-    linewidth (Optional[Union[float, Sequence[Optional[float]]]], optional):
-        Line width for all traces or per-trace widths. Defaults to None
-        (Matplotlib default).
-    n_flabels (int, optional): Approximate number of frequency labels to
-        place per trace (set 0 to disable, even if `f` is provided).
-        Defaults to 8.
-    funit (str, optional): Frequency unit used to scale/format labels.
-        One of {'Hz','kHz','MHz','GHz','THz'} (case-insensitive).
-        Defaults to 'GHz'.
+        Args:
+        S (np.ndarray | Sequence[np.ndarray]): One or more 1D complex arrays of
+            reflection coefficients (Γ) to plot (each shaped like (N,)).
+        f (Optional[np.ndarray  |  Sequence[np.ndarray]], optional): Frequency
+            vector(s) aligned with `S` for sparse on-curve labels; provide a
+            single array for all traces or one array per trace. Defaults to None.
+        colors (Optional[Union[str, Sequence[Optional[str]]]], optional): Color
+            for all traces or a sequence of per-trace colors. Defaults to None
+            (uses Matplotlib’s color cycle).
+        markers (Optional[Union[str, Sequence[str]]], optional): Marker style
+            for all traces or per-trace markers. Defaults to None (treated as 'none').
+        labels (Optional[Union[str, Sequence[str]]], optional): Legend label for
+            all traces or a sequence of per-trace labels. If omitted, no legend
+            is shown. Defaults to None.
+        title (Optional[str], optional): Axes title. Defaults to None.
+        linewidth (Optional[Union[float, Sequence[Optional[float]]]], optional):
+            Line width for all traces or per-trace widths. Defaults to None
+            (Matplotlib default).
+        n_flabels (int, optional): Approximate number of frequency labels to
+            place per trace (set 0 to disable, even if `f` is provided).
+            Defaults to 8.
+        funit (str, optional): Frequency unit used to scale/format labels.
+            One of {'Hz','kHz','MHz','GHz','THz'} (case-insensitive).
+            Defaults to 'GHz'.
 
-    Raises:
-    ValueError: If a style argument (`colors`, `markers`, `linewidth`, or
-        `labels`) is a sequence whose length does not match the number of traces.
-    ValueError: If `f` is a sequence whose length does not match the number
-        of traces.
-    ValueError: If `funit` is not one of {'Hz','kHz','MHz','GHz','THz'}.
+        Raises:
+        ValueError: If a style argument (`colors`, `markers`, `linewidth`, or
+            `labels`) is a sequence whose length does not match the number of traces.
+        ValueError: If `f` is a sequence whose length does not match the number
+            of traces.
+        ValueError: If `funit` is not one of {'Hz','kHz','MHz','GHz','THz'}.
 
-    Returns:
-    None: Draws the Smith chart on a new figure/axes and displays it with `plt.show()`.
-"""
+        Returns:
+        None: Draws the Smith chart on a new figure/axes and displays it with `plt.show()`.
+    """
     # --- normalize S into a list of 1D complex arrays ---
     if isinstance(S, (list, tuple)):
         Ss: List[np.ndarray] = [np.asarray(s).ravel() for s in S]
@@ -313,15 +329,15 @@ and sparse frequency annotations (e.g., labeled by frequency).
         return list(value)
 
     # --- style parameters (broadcast as needed) ---
-    markers_list = _broadcast(markers, 'none', 'markers')
-    colors_list  = _broadcast(colors, None, 'colors')
-    lw_list      = _broadcast(linewidth, None, 'linewidth')
+    markers_list = _broadcast(markers, "none", "markers")
+    colors_list = _broadcast(colors, None, "colors")
+    lw_list = _broadcast(linewidth, None, "linewidth")
     labels_list: Optional[List[Optional[str]]]
-    
+
     if labels is None:
         labels_list = None
     else:
-        labels_list = _broadcast(labels, None, 'labels')
+        labels_list = _broadcast(labels, None, "labels")
 
     # --- frequencies (broadcast as needed) ---
     if f is None:
@@ -336,7 +352,7 @@ and sparse frequency annotations (e.g., labeled by frequency).
             fs_list = [fi for _ in range(n_traces)]
 
     # --- unit scaling ---
-    units = {'hz':1.0, 'khz':1e3, 'mhz':1e6, 'ghz':1e9, 'thz':1e12}
+    units = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9, "thz": 1e12}
     key = funit.lower()
     if key not in units:
         raise ValueError(f"Unknown funit '{funit}'. Choose from {list(units.keys())}.")
@@ -347,33 +363,43 @@ and sparse frequency annotations (e.g., labeled by frequency).
 
     # --- smith grid (kept out of legend) ---
     for line in _smith_transform(_generate_grids()):
-        ax.plot(line[0], line[1], color='0.6', alpha=0.3, linewidth=0.7, label='_nolegend_')
+        ax.plot(
+            line[0], line[1], color="0.6", alpha=0.3, linewidth=0.7, label="_nolegend_"
+        )
 
     # unit circle
-    p = np.linspace(0, 2*np.pi, 361)
-    ax.plot(np.cos(p), np.sin(p), color='black', alpha=0.5, linewidth=0.8, label='_nolegend_')
+    p = np.linspace(0, 2 * np.pi, 361)
+    ax.plot(
+        np.cos(p),
+        np.sin(p),
+        color="black",
+        alpha=0.5,
+        linewidth=0.8,
+        label="_nolegend_",
+    )
 
     # --- annotate a few impedance reference ticks (kept out of legend) ---
     ref_vals = [0, 0.2, 0.5, 1, 2, 10]
     for r in ref_vals:
-        z = r + 1j*0
+        z = r + 1j * 0
         G = (z - 1) / (z + 1)
-        ax.annotate(f"{r}", (G.real, G.imag), color='black', fontsize=8)
+        ax.annotate(f"{r}", (G.real, G.imag), color="black", fontsize=8)
     for x in ref_vals:
-        z = 0 + 1j*x
+        z = 0 + 1j * x
         G = (z - 1) / (z + 1)
-        ax.annotate(f"{x}", (G.real, G.imag), color='black', fontsize=8)
-        ax.annotate(f"{-x}", (G.real, -G.imag), color='black', fontsize=8)
+        ax.annotate(f"{x}", (G.real, G.imag), color="black", fontsize=8)
+        ax.annotate(f"{-x}", (G.real, -G.imag), color="black", fontsize=8)
 
     # --- plot traces ---
     for i, s in enumerate(Ss):
         lbl = labels_list[i] if labels_list is not None else None
-        line, = ax.plot(
-            s.real, s.imag,
+        (line,) = ax.plot(
+            s.real,
+            s.imag,
             color=colors_list[i],
             marker=markers_list[i],
             linewidth=lw_list[i],
-            label=lbl
+            label=lbl,
         )
 
         # frequency labels (sparse)
@@ -382,7 +408,9 @@ and sparse frequency annotations (e.g., labeled by frequency).
             continue
         if n_flabels > 0 and len(s) > 0 and len(fi) > 0:
             n = min(len(s), len(fi))
-            step = max(1, int(round(n / n_flabels))) if n_flabels > 0 else n  # avoid step=0
+            step = (
+                max(1, int(round(n / n_flabels))) if n_flabels > 0 else n
+            )  # avoid step=0
             idx = np.arange(0, n, step)
             # small offset so labels don't sit right on the curve
             dx = 0.03
@@ -390,42 +418,51 @@ and sparse frequency annotations (e.g., labeled by frequency).
                 fk = fi[k] / fdiv
                 # choose a compact format (3 significant digits)
                 idigit = 3
-                if np.log10(fk)>3:
+                if np.log10(fk) > 3:
                     idigit = 1
                 ftxt = f"{fk:.{idigit}f}{funit}"
-                ax.annotate(ftxt, (s[k].real + dx, s[k].imag), fontsize=8, color=line.get_color())
+                ax.annotate(
+                    ftxt,
+                    (s[k].real + dx, s[k].imag),
+                    fontsize=8,
+                    color=line.get_color(),
+                )
 
     # legend only if labels were given
     if labels_list is not None:
-        ax.legend(loc='best')
+        ax.legend(loc="best")
 
     if title:
         ax.set_title(title)
 
-    ax.set_aspect('equal', adjustable='box')
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
     ax.grid(False)
     plt.tight_layout()
     plt.show()
 
-def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray, 
-            dblim=[-40, 5], 
-            xunit="GHz", 
-            levelindicator: int | float | None = None, 
-            noise_floor=-150, 
-            fill_areas: list[tuple] | None = None, 
-            spec_area: list[tuple[float,...]] | None = None,
-            unwrap_phase=False, 
-            logx: bool = False,
-            labels: list[str] | None = None,
-            linestyles: list[str] | None = None,
-            colorcycle: list[int] | None = None,
-            filename: str | None = None,
-            show_plot: bool = True,
-            figdata: tuple | None = None) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
+
+def plot_sp(
+    f: np.ndarray | list[np.ndarray],
+    S: list[np.ndarray] | np.ndarray,
+    dblim=[-40, 5],
+    xunit="GHz",
+    levelindicator: int | float | None = None,
+    noise_floor=-150,
+    fill_areas: list[tuple] | None = None,
+    spec_area: list[tuple[float, ...]] | None = None,
+    unwrap_phase=False,
+    logx: bool = False,
+    labels: list[str] | None = None,
+    linestyles: list[str] | None = None,
+    colorcycle: list[int] | None = None,
+    filename: str | None = None,
+    show_plot: bool = True,
+    figdata: tuple | None = None,
+) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     """Plot S-parameters in dB and phase
-    
+
     One may provide:
      - A single frequency with a single S-parameter
      - A single frequency with a list of S-parameters
@@ -447,30 +484,32 @@ def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray,
         colorcycle (list[int], optional): A list of colors to use. Defaults to None.
         filename (str, optional): The filename (will automatically save). Defaults to None.
         show_plot (bool, optional): If or not to show the resulting plot. Defaults to True.
-    """    
+    """
     if not isinstance(S, list):
         Ss = [S]
     else:
         Ss = S
-        
+
     if not isinstance(f, list):
         fs = [f for _ in Ss]
     else:
         fs = f
-    
+
     if linestyles is None:
-        linestyles = ['-' for _ in S]
+        linestyles = ["-" for _ in S]
 
     if colorcycle is None:
         colorcycle = [i for i, S in enumerate(S)]
 
     unitdivider: dict[str, float] = {"MHz": 1e6, "GHz": 1e9, "kHz": 1e3}
-    
+
     fs = [f / unitdivider[xunit] for f in fs]
 
     if figdata is None:
         # Create two subplots: one for magnitude and one for phase
-        fig, (ax_mag, ax_phase) = plt.subplots(2, 1, sharex=False, gridspec_kw={'height_ratios': [3, 1]})
+        fig, (ax_mag, ax_phase) = plt.subplots(
+            2, 1, sharex=False, gridspec_kw={"height_ratios": [3, 1]}
+        )
         fig.subplots_adjust(hspace=0.3)
     else:
         fig, ax_mag, ax_phase = figdata
@@ -479,8 +518,18 @@ def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray,
     maxy = 0
     for f, s, ls, cid in zip(fs, Ss, linestyles, colorcycle):
         # Calculate and plot magnitude in dB
-        SdB = 20 * np.log10(np.abs(s) + 10**(noise_floor/20) * np.random.rand(*s.shape) + 10**((noise_floor-30)/20))
-        ax_mag.plot(f, SdB, label="Magnitude (dB)", linestyle=ls, color=EMERGE_COLORS[cid % len(EMERGE_COLORS)])
+        SdB = 20 * np.log10(
+            np.abs(s)
+            + 10 ** (noise_floor / 20) * np.random.rand(*s.shape)
+            + 10 ** ((noise_floor - 30) / 20)
+        )
+        ax_mag.plot(
+            f,
+            SdB,
+            label="Magnitude (dB)",
+            linestyle=ls,
+            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+        )
         if np.max(SdB) > maxy:
             maxy = np.max(SdB)
         # Calculate and plot phase in degrees
@@ -489,7 +538,13 @@ def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray,
             phase = np.unwrap(phase, period=360)
             minphase = min(np.min(phase), minphase)
             maxphase = max(np.max(phase), maxphase)
-        ax_phase.plot(f, phase, label="Phase (degrees)", linestyle=ls, color=EMERGE_COLORS[cid % len(EMERGE_COLORS)])
+        ax_phase.plot(
+            f,
+            phase,
+            label="Phase (degrees)",
+            linestyle=ls,
+            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+        )
 
         # Annotate level indicators if specified
         if isinstance(levelindicator, (int, float)) and levelindicator is not None:
@@ -506,31 +561,31 @@ def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray,
         for fmin, fmax in fill_areas:
             f1 = fmin / unitdivider[xunit]
             f2 = fmax / unitdivider[xunit]
-            ax_mag.fill_between([f1, f2], dblim[0], dblim[1], color='grey', alpha= 0.2)
-            ax_phase.fill_between([f1, f2], minphase, maxphase, color='grey', alpha= 0.2)
+            ax_mag.fill_between([f1, f2], dblim[0], dblim[1], color="grey", alpha=0.2)
+            ax_phase.fill_between([f1, f2], minphase, maxphase, color="grey", alpha=0.2)
     if spec_area is not None:
         for fmin, fmax, vmin, vmax in spec_area:
             f1 = fmin / unitdivider[xunit]
             f2 = fmax / unitdivider[xunit]
-            ax_mag.fill_between([f1, f2], vmin,vmax, color='red', alpha=0.2)
+            ax_mag.fill_between([f1, f2], vmin, vmax, color="red", alpha=0.2)
     # Configure magnitude plot (ax_mag)
     fmin = min([min(f) for f in fs])
     fmax = max([max(f) for f in fs])
     ax_mag.set_ylabel("Magnitude (dB)")
     ax_mag.set_xlabel(f"Frequency ({xunit})")
-    ax_mag.axis([fmin, fmax, dblim[0], max(maxy*1.1,dblim[1])]) # type: ignore
+    ax_mag.axis([fmin, fmax, dblim[0], max(maxy * 1.1, dblim[1])])  # type: ignore
     ax_mag.axhline(y=0, color="k", linewidth=1)
     ax_mag.xaxis.set_minor_locator(tck.AutoMinorLocator(2))
     ax_mag.yaxis.set_minor_locator(tck.AutoMinorLocator(2))
     # Configure phase plot (ax_phase)
     ax_phase.set_ylabel("Phase (degrees)")
     ax_phase.set_xlabel(f"Frequency ({xunit})")
-    ax_phase.axis([fmin, fmax, minphase, maxphase]) # type: ignore
+    ax_phase.axis([fmin, fmax, minphase, maxphase])  # type: ignore
     ax_phase.xaxis.set_minor_locator(tck.AutoMinorLocator(2))
     ax_phase.yaxis.set_minor_locator(tck.AutoMinorLocator(2))
     if logx:
-        ax_mag.set_xscale('log')
-        ax_phase.set_xscale('log')
+        ax_mag.set_xscale("log")
+        ax_phase.set_xscale("log")
     if labels is not None:
         ax_mag.legend(labels)
         ax_phase.legend(labels)
@@ -541,20 +596,24 @@ def plot_sp(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray,
 
     return fig, ax_mag, ax_phase
 
-def plot_vswr(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray, 
-            swrlim=[1, 5], 
-            xunit="GHz", 
-            levelindicator: int | float | None = None, 
-            fill_areas: list[tuple] | None = None, 
-            spec_area: list[tuple[float,...]] | None = None,
-            labels: list[str] | None = None,
-            linestyles: list[str] | None = None,
-            colorcycle: list[int] | None = None,
-            filename: str | None = None,
-            show_plot: bool = True,
-            figdata: tuple | None = None) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
+
+def plot_vswr(
+    f: np.ndarray | list[np.ndarray],
+    S: list[np.ndarray] | np.ndarray,
+    swrlim=[1, 5],
+    xunit="GHz",
+    levelindicator: int | float | None = None,
+    fill_areas: list[tuple] | None = None,
+    spec_area: list[tuple[float, ...]] | None = None,
+    labels: list[str] | None = None,
+    linestyles: list[str] | None = None,
+    colorcycle: list[int] | None = None,
+    filename: str | None = None,
+    show_plot: bool = True,
+    figdata: tuple | None = None,
+) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     """Plot S-parameters in VSWR
-    
+
     One may provide:
      - A single frequency with a single S-parameter
      - A single frequency with a list of S-parameters
@@ -573,26 +632,26 @@ def plot_vswr(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray
         colorcycle (list[int], optional): A list of colors to use. Defaults to None.
         filename (str, optional): The filename (will automatically save). Defaults to None.
         show_plot (bool, optional): If or not to show the resulting plot. Defaults to True.
-        
-    """    
+
+    """
     if not isinstance(S, list):
         Ss = [S]
     else:
         Ss = S
-        
+
     if not isinstance(f, list):
         fs = [f for _ in Ss]
     else:
         fs = f
-    
+
     if linestyles is None:
-        linestyles = ['-' for _ in S]
+        linestyles = ["-" for _ in S]
 
     if colorcycle is None:
         colorcycle = [i for i, S in enumerate(S)]
 
     unitdivider: dict[str, float] = {"MHz": 1e6, "GHz": 1e9, "kHz": 1e3}
-    
+
     fs = [f / unitdivider[xunit] for f in fs]
 
     if figdata is None:
@@ -603,11 +662,16 @@ def plot_vswr(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray
         fig, ax_swr = figdata
     maxy = 5
 
-
     for f, s, ls, cid in zip(fs, Ss, linestyles, colorcycle):
         # Calculate and plot magnitude in dB
         SWR = np.divide((1 + abs(s)), (1 - abs(s)))
-        ax_swr.plot(f, SWR, label="VSWR", linestyle=ls, color=EMERGE_COLORS[cid % len(EMERGE_COLORS)])
+        ax_swr.plot(
+            f,
+            SWR,
+            label="VSWR",
+            linestyle=ls,
+            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+        )
         if np.max(SWR) > maxy:
             maxy = np.max(SWR)
 
@@ -622,26 +686,25 @@ def plot_vswr(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray
                     xytext=(fa + 0.08 * (max(f) - min(f)) / unitdivider[xunit], lvl),
                     arrowprops=dict(facecolor="black", width=1, headwidth=5),
                 )
-    
-    
+
     if fill_areas is not None:
         for fmin, fmax in fill_areas:
             f1 = fmin / unitdivider[xunit]
             f2 = fmax / unitdivider[xunit]
-            ax_swr.fill_between([f1, f2], swrlim[0], swrlim[1], color='grey', alpha= 0.2)
+            ax_swr.fill_between([f1, f2], swrlim[0], swrlim[1], color="grey", alpha=0.2)
 
     if spec_area is not None:
         for fmin, fmax, vmin, vmax in spec_area:
             f1 = fmin / unitdivider[xunit]
             f2 = fmax / unitdivider[xunit]
-            ax_swr.fill_between([f1, f2], vmin,vmax, color='red', alpha=0.2)
+            ax_swr.fill_between([f1, f2], vmin, vmax, color="red", alpha=0.2)
 
     # Configure magnitude plot (ax_swr)
     fmin = min([min(f) for f in fs])
     fmax = max([max(f) for f in fs])
     ax_swr.set_ylabel("VSWR")
     ax_swr.set_xlabel(f"Frequency ({xunit})")
-    ax_swr.axis([fmin, fmax, swrlim[0], max(maxy*1.1,swrlim[1])]) # type: ignore
+    ax_swr.axis([fmin, fmax, swrlim[0], max(maxy * 1.1, swrlim[1])])  # type: ignore
     ax_swr.xaxis.set_minor_locator(tck.AutoMinorLocator(2))
     ax_swr.yaxis.set_minor_locator(tck.AutoMinorLocator(2))
 
@@ -653,7 +716,8 @@ def plot_vswr(f: np.ndarray | list[np.ndarray], S: list[np.ndarray] | np.ndarray
         fig.savefig(filename)
 
     return fig, ax_swr
-    
+
+
 def plot_ff(
     theta: np.ndarray | list[np.ndarray],
     E: Union[np.ndarray, Sequence[np.ndarray]],
@@ -667,7 +731,7 @@ def plot_ff(
     markers: Optional[Union[str, List[Optional[str]]]] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
 ) -> None:
     """
     Far-field rectangular plot of E-field magnitude vs angle.
@@ -695,19 +759,21 @@ def plot_ff(
         E_list = [E]
     else:
         E_list = list(E)
-        
+
     if not isinstance(theta, list):
         thetas = [theta for _ in E_list]
     else:
         thetas = theta
-        
+
     n_series = len(E_list)
 
     # Style broadcasting
     def _broadcast(param, default):
         if isinstance(param, list):
             if len(param) != n_series:
-                raise ValueError(f"List length of `{param}` must match number of series")
+                raise ValueError(
+                    f"List length of `{param}` must match number of series"
+                )
             return param
         else:
             return [param] * n_series
@@ -720,13 +786,14 @@ def plot_ff(
         theta = thetas[i]
         mag = np.abs(Ei)
         if dB:
-            mag = 20*np.log10(mag)
+            mag = 20 * np.log10(mag)
         ax.plot(
-            theta, mag,
+            theta,
+            mag,
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],
-            label=(labels[i] if labels else None)
+            label=(labels[i] if labels else None),
         )
 
     ax.grid(grid)
@@ -743,6 +810,7 @@ def plot_ff(
 
     plt.show()
 
+
 def plot_ff_polar(
     theta: np.ndarray,
     E: Union[np.ndarray, Sequence[np.ndarray]],
@@ -752,11 +820,11 @@ def plot_ff_polar(
     linestyles: Union[str, List[str]] = "-",
     linewidth: float = 2.0,
     markers: Optional[Union[str, List[Optional[str]]]] = None,
-    zero_location: str = 'N',
+    zero_location: str = "N",
     clockwise: bool = False,
     rlabel_angle: float = 45,
     rlim: tuple[float, float] | None = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
 ) -> None:
     """
     Far-field polar plot of E-field magnitude vs angle.
@@ -787,12 +855,18 @@ def plot_ff_polar(
     n_series = len(E_list)
 
     if dB:
-        E_list = [20*np.log10(np.clip(np.abs(e), a_min=10**(dBfloor/20), a_max = 1e9)) for e in E_list]
+        E_list = [
+            20 * np.log10(np.clip(np.abs(e), a_min=10 ** (dBfloor / 20), a_max=1e9))
+            for e in E_list
+        ]
+
     # Style broadcasting
     def _broadcast(param, default):
         if isinstance(param, list):
             if len(param) != n_series:
-                raise ValueError(f"List length of `{param}` must match number of series")
+                raise ValueError(
+                    f"List length of `{param}` must match number of series"
+                )
             return param
         else:
             return [param] * n_series
@@ -800,38 +874,38 @@ def plot_ff_polar(
     linestyles = _broadcast(linestyles, "-")
     markers = _broadcast(markers, None) if markers is not None else [None] * n_series
 
-    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
-    ax.set_theta_zero_location(zero_location) # type: ignore
-    ax.set_theta_direction(-1 if clockwise else 1) # type: ignore
-    
-    ax.set_rlabel_position(rlabel_angle) # type: ignore
+    fig, ax = plt.subplots(subplot_kw={"projection": "polar"})
+    ax.set_theta_zero_location(zero_location)  # type: ignore
+    ax.set_theta_direction(-1 if clockwise else 1)  # type: ignore
+
+    ax.set_rlabel_position(rlabel_angle)  # type: ignore
     ymin = min([min(E) for E in E_list])
     ymax = max([max(E) for E in E_list])
-    yrange = ymax-ymin
+    yrange = ymax - ymin
 
-    ylim_min = ymin-0.05*yrange
-    ylim_max = ymax+0.05*yrange
+    ylim_min = ymin - 0.05 * yrange
+    ylim_max = ymax + 0.05 * yrange
     if rlim is not None:
         y1, y2 = rlim
         if y1 is not None:
             ylim_min = y1
         if y2 is not None:
             ylim_max = y2
-        
+
     ax.set_ylim(ylim_min, ylim_max)
     for i, Ei in enumerate(E_list):
-        
         ax.plot(
-            theta, Ei,
+            theta,
+            Ei,
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],
-            label=(labels[i] if labels else None)
+            label=(labels[i] if labels else None),
         )
 
     if title:
-        ax.set_title(title, va='bottom')
+        ax.set_title(title, va="bottom")
     if labels:
-        ax.legend(loc='upper right', bbox_to_anchor=(1.1, 1.1))
+        ax.legend(loc="upper right", bbox_to_anchor=(1.1, 1.1))
 
     plt.show()
