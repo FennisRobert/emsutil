@@ -374,37 +374,41 @@ class EMergeTheme:
         return (r, g, b, a)
 
     def parse_color(
-        self, color: str | tuple[float, float, float]
-    ) -> tuple[float, float, float]:
+        self,
+        color: str | tuple[float, float, float],
+        default: str | None = None,
+    ) -> str | tuple[float, float, float] | None:
         """Parses a color input which can be either a hex string or an RGB tuple."""
 
-        colstr = False
+        if color is None:
+            return default
+
         if isinstance(color, str):
-            col = self.color_hex_to_tuple(color)
-            colstr = True
-        else:
-            if len(color) == 3:
-                col = (color[0], color[1], color[2], 1.0)
+            if color[0] == "#":
+                return self.color_hex_to_tuple(color)
             else:
-                col = color
+                return self.parse_color_name(color)
+        else:
+            return color
 
-        # apply a brightness modifier to the RGB values (without A channel)
-        col = tuple([min(1.0, c * self.brightness) for c in col[:3]]) + (col[3],)
+        # Blending effects temporarily not used.
+        # # apply a brightness modifier to the RGB values (without A channel)
+        # col = tuple([min(1.0, c * self.brightness) for c in col[:3]]) + (col[3],)
 
-        # mix the color with the mix_color by alpha blending
+        # # mix the color with the mix_color by alpha blending
 
-        for blending_mode, mix_color, alpha in self.bleding_sequence:
-            col = self._apply_color_blend(col, blending_mode, mix_color, alpha)
+        # for blending_mode, mix_color, alpha in self.bleding_sequence:
+        #     col = self._apply_color_blend(col, blending_mode, mix_color, alpha)
 
-        # Parse back
-        if colstr:
-            return self.color_tuple_to_hex(col)
+        # # Parse back
+        # if colstr:
+        #     return self.color_tuple_to_hex(col)
 
-        # remove alpha channel if it is 100%
-        if col[3] == 1.0:
-            return col[:3]
+        # # remove alpha channel if it is 100%
+        # if col[3] == 1.0:
+        #     return col[:3]
 
-        return col
+        # return col
 
 
 class PVDisplaySettings:

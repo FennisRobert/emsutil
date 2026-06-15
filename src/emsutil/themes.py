@@ -587,12 +587,12 @@ class _EMV3(EMergeTheme):
         }
 
         self.line_color_cycle = [
-            "#5151ff",
-            "#d73d3d",
-            "#4DE94D",
-            "#FF4482",
-            "#FF8E32",
-            "#44ABEB",
+            "#8484ff",
+            "#ff7d7d",
+            "#73FF73",
+            "#FF5E94",
+            "#FFB06F",
+            "#65E8FF",
         ]
 
         self.color_name_map = {

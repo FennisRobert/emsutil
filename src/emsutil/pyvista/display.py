@@ -1392,13 +1392,18 @@ class EMergeDisplay:
             self._animate_next = False
         self._reset_cbar()
 
-    def add_title(self, title: str) -> None:
+    def add_title(self, title: str, color: str = "EMERGE-TEXT") -> None:
         """Adds a title to the plot
 
         Args:
             title (str): The title name
         """
-        self._plot.add_text(title, position="upper_edge", font_size=18)
+        self._plot.add_text(
+            title,
+            position="upper_edge",
+            font_size=18,
+            color=self.set.theme.parse_color(color),
+        )
 
     def add_text(
         self,
