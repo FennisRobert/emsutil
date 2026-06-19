@@ -1537,6 +1537,7 @@ class EMergeDisplay:
         clim: tuple[float, float] | None = None,
         cmap: cmap_names | None = None,
         opacity: float = 1.0,
+        _fieldname: str | None = None,
     ):
         """Adds a 3D volumetric plot with clip plane based on a 3D grid of X,Y,Z and field values
 
@@ -1551,10 +1552,16 @@ class EMergeDisplay:
         """
         Vf = V.flatten()
         Vf = np.nan_to_num(Vf)
-        vmin = np.min(np.real(Vf)) * clim_crop_factor
-        vmax = np.max(np.real(Vf)) * clim_crop_factor
-
+        vmin, vmax = nanminmax(Vf.real)
+        vmin = vmin * clim_crop_factor
+        vmax = vmax * clim_crop_factor
+        
         default_cmap = self.set.theme.default_amplitude_cmap
+
+        if _fieldname is None:
+            name = self._get_fieldname()
+        else:
+            name = _fieldname
 
         if scale == "log":
             T = lambda x: np.log10(np.abs(x + 1e-12))
@@ -1582,13 +1589,14 @@ class EMergeDisplay:
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
-        grid["anim"] = T(np.real(field))
+        grid[name] = T(np.real(field))
         kwargs = self.set.theme.surf_kwargs
 
         self._plot.add_mesh_clip_plane(
             grid,
             opacity=opacity,
             cmap=cmap,
+            clim=clim,
             pickable=False,
             scalar_bar_args=self._cbar_args,
             **kwargs,
@@ -1608,6 +1616,7 @@ class EMergeDisplay:
         clim_crop_factor: float = 1.0,
         clim: tuple[float, float] | None = None,
         cmap: cmap_names | None = None,
+        _fieldname: str | None = None,
         opacity: float = 0.25,
     ):
         """Adds a 3D volumetric contourplot based on a 3D grid of X,Y,Z and field values
@@ -1627,6 +1636,11 @@ class EMergeDisplay:
         vmax = vmax * clim_crop_factor
 
         Vf = np.nan_to_num(Vf)
+
+        if _fieldname is None:
+            name = self._get_fieldname()
+        else:
+            name = _fieldname
 
         default_cmap = self.set.theme.default_amplitude_cmap
 
@@ -1656,8 +1670,9 @@ class EMergeDisplay:
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
-        grid["anim"] = T(np.real(field))
+        grid[name] = T(np.real(field))
 
+        self._cbar_defaults(title=name)
         levels = list(np.linspace(vmin, vmax, Nlevels))
         contour = grid.contour(isosurfaces=levels)
 
@@ -1677,7 +1692,7 @@ class EMergeDisplay:
 
             def on_update(obj: _AnimObject, phi: complex):
                 new_vals = obj.T(np.real(obj.field * phi))
-                obj.grid["anim"] = new_vals
+                obj.grid[name] = new_vals
                 new_contour = obj.grid.contour(isosurfaces=levels)
                 obj.actor.GetMapper().SetInputData(new_contour)  # type: ignore
 
