@@ -1244,7 +1244,7 @@ class EMergeDisplay:
         # If no cmap is provided, pick the default.
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         # Set default plot argument settings
@@ -1359,7 +1359,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         kwargs = setdefault(
@@ -1487,7 +1487,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = self.set.theme.default_amplitude_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         x, y, z, dx, dy, dz = x[ids], y[ids], z[ids], dx[ids], dy[ids], dz[ids]
@@ -1584,7 +1584,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
@@ -1665,7 +1665,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
@@ -1768,7 +1768,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
@@ -1877,7 +1877,7 @@ class EMergeDisplay:
 
         if cmap is None:
             cmap = default_cmap
-        else:
+        elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
