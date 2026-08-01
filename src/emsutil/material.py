@@ -267,29 +267,34 @@ class Material(Saveable):
 
     Additionally, a frequency, coordinate or both frequency and coordinate dependent material property
     may be supplied for the properties: er, ur, tand and cond.
-    
+
     To supply a frequency-dependent property use: emerge.FreqDependent()
     To supply a coordinate-dependent property use: emerge.CoordDependent()
     to supply a frequency and coordinate dependent property use: emerge.FreqCoordDependent()
-    
+
     """
+    _matnames: list[str] = []
+    _namectr: int = 0
+
     _pickle_exclude = {"_neff"}
     skip_fields = ("_neff",)
-    
-    def __init__(self,
-                 er: float | complex | np.ndarray | MatProperty = 1.0,
-                 ur: float | complex | np.ndarray | MatProperty = 1.0,
-                 tand: float | MatProperty = 0.0,
-                 cond: float | MatProperty = 0.0,
-                 _neff: float | None = None,
-                 density: float | MatProperty = 1.0,
-                 cond_thermal: float | MatProperty = 1.0,
-                 specific_heat: float | MatProperty = 1.0,
-                 color: str ="#BEBEBE",
-                 opacity: float = 1.0,
-                 _metal: bool = False,
-                 name: str = 'unnamed'):
-        
+
+    def __init__(
+        self,
+        er: float | complex | np.ndarray | MatProperty = 1.0,
+        ur: float | complex | np.ndarray | MatProperty = 1.0,
+        tand: float | MatProperty = 0.0,
+        cond: float | MatProperty = 0.0,
+        _neff: float | None = None,
+        density: float | MatProperty = 1.0,
+        cond_thermal: float | MatProperty = 1.0,
+        specific_heat: float | MatProperty = 1.0,
+        color: str = "#BEBEBE",
+        opacity: float = 1.0,
+        _metal: bool = False,
+        name: str | None = None,
+    ):
+
         if not isinstance(er, MatProperty):
             er = MatProperty(er)
         if not isinstance(ur, MatProperty):
@@ -298,14 +303,14 @@ class Material(Saveable):
             tand = MatProperty(tand)
         if not isinstance(cond, MatProperty):
             cond = MatProperty(cond)
-        
+
         if not isinstance(density, MatProperty):
             density = MatProperty(density)
         if not isinstance(cond_thermal, MatProperty):
             cond_thermal = MatProperty(cond_thermal)
         if not isinstance(specific_heat, MatProperty):
             specific_heat = MatProperty(specific_heat)
-            
+
         # Electrical
         self.er: MatProperty = er
         self.ur: MatProperty = ur
@@ -322,69 +327,95 @@ class Material(Saveable):
         self.color: str = color
         self.opacity: float = opacity
         self._hash_key: int = -1
-        
+
         if _neff is None:
-            self._neff: Callable = lambda f: np.sqrt(self.ur._fmax(f)*self.er._fmax(f))
+            self._neff: Callable = lambda f: np.sqrt(
+                self.ur._fmax(f) * self.er._fmax(f)
+            )
         else:
             self._neff: Callable = lambda f: _neff
         self._metal: bool = _metal
-    
+
+        if self.name is None:
+            self.name = self._generate_name()
+        
+    @classmethod
+    def _generate_name(cls) -> str:
+        i = cls._namectr
+        while True:
+            name = f'UnnamedMaterial_{i}'
+            if name not in cls._matnames:
+                cls._matnames.append(name)
+                cls._namectr = i+1
+                break
+            i += 1
+        return name
+
     @property
-    def _color_rgb(self) -> tuple[float,float,float]:
-        return tuple(int(self.color.lstrip('#')[i:i+2], 16)/255.0 for i in (0, 2, 4))
-    
+    def _color_rgb(self) -> tuple[float, float, float]:
+        return tuple(
+            int(self.color.lstrip("#")[i : i + 2], 16) / 255.0 for i in (0, 2, 4)
+        )
+
     def __getstate__(self):
         state = self.__dict__.copy()
         for k in self._pickle_exclude:
             state.pop(k, None)
-        
+
         return state
-    
+
     def __setstate__(self, state):
         self.__dict__.update(state)
         for k in self._pickle_exclude:
             setattr(self, k, None)
 
-    def __hash__(self):
-        return self._hash_key
+    def __hash__(self) -> int:
+        return id(self)
     
     def __str__(self) -> str:
-        return f'Material({self.name}, {self._hash_key})'
-    
+        return f"Material({self.name})"
+
     def __repr__(self):
-        return f'Material({self.name}, {self._hash_key})'
-    
+        return f"Material({self.name})"
+
     @property
     def frequency_dependent(self) -> bool:
-        """If The material property are at all frequency dependent.
-        
-        """
-        return self.er._freq_dependent or self.ur._freq_dependent or self.tand._freq_dependent or self.cond._freq_dependent
-    
+        """If The material property are at all frequency dependent."""
+        return (
+            self.er._freq_dependent
+            or self.ur._freq_dependent
+            or self.tand._freq_dependent
+            or self.cond._freq_dependent
+        )
+
     @property
     def coordinate_dependent(self) -> bool:
-        """If the material properties are at all coordinate dependent
-        
-        """
-        return self.er._coord_dependent or self.ur._coord_dependent or self.tand._coord_dependent or self.cond._coord_dependent
-    
-    
+        """If the material properties are at all coordinate dependent"""
+        return (
+            self.er._coord_dependent
+            or self.ur._coord_dependent
+            or self.tand._coord_dependent
+            or self.cond._coord_dependent
+        )
+
     def neff(self, f: float):
-        """ Computes the maximum occuring effective refractive index for this material."""
+        """Computes the maximum occuring effective refractive index for this material."""
         return self._neff(f)
-    
+
     @property
-    def color_rgb(self) -> tuple[float,float,float]:
+    def color_rgb(self) -> tuple[float, float, float]:
         return self._color_rgb
-     
+
     @staticmethod
-    def drude_model(conductivity: float, 
-                    colission_time: float, 
-                    er: float = 1.0,
-                    ur: float = 1.0, 
-                    color: str = "#aaaaaa", 
-                    opacity: float = 0.3,
-                    metal: bool = True) -> Material:
+    def drude_model(
+        conductivity: float,
+        colission_time: float,
+        er: float = 1.0,
+        ur: float = 1.0,
+        color: str = "#aaaaaa",
+        opacity: float = 0.3,
+        metal: bool = True,
+    ) -> Material:
         """Creates a Material using the Drume model for conductivity
         Requires at least the DC bulk condutivity σ₀ [S/m] and the
         collision time τ.
@@ -401,13 +432,37 @@ class Material(Saveable):
         Returns:
             Material: The resultant material.
         """
-        colission_dist = colission_time/C0
-        fsigma = FreqDependent(scalar = lambda f: conductivity/(1 - 1j*2*np.pi*f*colission_dist))
+        colission_dist = colission_time / C0
+        fsigma = FreqDependent(
+            scalar=lambda f: conductivity / (1 - 1j * 2 * np.pi * f * colission_dist)
+        )
         return Material(er, ur, 0.0, fsigma, color=color, opacity=opacity, _metal=metal)
     
-AIR = Material(color="#4496f3", opacity=0.05, name='Air',
-               cond_thermal=0.026, density=1.225, specific_heat=1005)
-COPPER = Material(cond=5.8e7, color="#62290c", _metal=True, name='Copper',
-                  cond_thermal=401, density=8960, specific_heat=385)
-PEC = Material(color="#ff78aa", opacity=1.0, cond=1e30, _metal=True, name="PEC",
-               cond_thermal=1e30, density=8960, specific_heat=385)
+AIR = Material(
+    color="EMERGE-AIR",
+    opacity="EMERGE-AIR",
+    name="Air",
+    cond_thermal=0.026,
+    density=1.225,
+    specific_heat=1005,
+)
+COPPER = Material(
+    cond=5.8e7,
+    color="EMERGE-COPPER",
+    opacity="EMERGE-CONDUCTOR",
+    _metal=True,
+    name="Copper",
+    cond_thermal=401,
+    density=8960,
+    specific_heat=385,
+)
+PEC = Material(
+    color="EMERGE-PEC",
+    opacity="EMERGE-CONDUCTOR",
+    cond=1e30,
+    _metal=True,
+    name="PEC",
+    cond_thermal=1e30,
+    density=8960,
+    specific_heat=385,
+)

@@ -870,7 +870,7 @@ class EMergeDisplay:
     ) -> pv.Actor:
 
         style = self.set.theme.render_style
-        color = self.set.theme.parse_color_name(color)
+        color = self.set.theme.parse_color(color)
         opacity = self.set.theme.parse_opacity(opacity)
 
         # Default rendering settings
