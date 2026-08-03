@@ -5,9 +5,6 @@
 ║  This file is released under CC0 1.0 – Public-Domain Dedication.     ║
 ║  You may use, copy, modify, and distribute it without restriction.   ║
 ║                                                                      ║
-║  All OTHER files in this repository are proprietary. See LICENSE     ║
-║  at the project root for full terms, conditions, and disclaimers.    ║
-║                                                                      ║
 ║  DISCLAIMER: Data herein are provided "as is", with no warranties.   ║
 ║  Verify critical values independently before use.                    ║
 ╚══════════════════════════════════════════════════════════════════════╝
