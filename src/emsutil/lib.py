@@ -1,10 +1,5 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  library.py – Material-property database                             ║
-║                                                                      ║
-║  This file is released under CC0 1.0 – Public-Domain Dedication.     ║
-║  You may use, copy, modify, and distribute it without restriction.   ║
-║                                                                      ║
 ║  DISCLAIMER: Data herein are provided "as is", with no warranties.   ║
 ║  Verify critical values independently before use.                    ║
 ╚══════════════════════════════════════════════════════════════════════╝
