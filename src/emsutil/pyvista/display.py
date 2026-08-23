@@ -1464,43 +1464,39 @@ class EMergeDisplay:
         scalemode: Literal["lin", "log"] = "lin",
         _fieldname: str = "",
     ):
-        """Add a quiver plot to the display
-
-        Args:
-            x (np.ndarray): The X-coordinates
-            y (np.ndarray): The Y-coordinates
-            z (np.ndarray): The Z-coordinates
-            dx (np.ndarray): The arrow X-magnitude
-            dy (np.ndarray): The arrow Y-magnitude
-            dz (np.ndarray): The arrow Z-magnitude
-            scale (float, optional): The arrow scale. Defaults to 1.
-            scalemode (Literal['lin','log'], optional): Wether to scale lin or log. Defaults to 'lin'.
-        """
         x = x.flatten()
         y = y.flatten()
         z = z.flatten()
-        dx = dx.flatten().real
-        dy = dy.flatten().real
-        dz = dz.flatten().real
+        # Keep the complex components alive for animation; only take .real
+        # once we've decided which frame's instantaneous value we want.
+        dx_c = dx.flatten()
+        dy_c = dy.flatten()
+        dz_c = dz.flatten()
 
-        ids = np.invert(np.isnan(dx))
+        ids = np.invert(np.isnan(dx_c.real))
 
         if cmap is None:
             cmap = self.set.theme.default_amplitude_cmap
         elif isinstance(cmap, str):
             cmap = self.set.theme.parse_cmap_name(cmap)
 
-        x, y, z, dx, dy, dz = x[ids], y[ids], z[ids], dx[ids], dy[ids], dz[ids]
-        if scalemode == "log":
-            dx, dy, dz = _logscale(dx, dy, dz)
+        x, y, z = x[ids], y[ids], z[ids]
+        dx_c, dy_c, dz_c = dx_c[ids], dy_c[ids], dz_c[ids]
 
         dmin = _min_distance(x, y, z)
-        dmax = np.max(_norm(dx, dy, dz))
 
-        Vec = scale * np.array([dx, dy, dz]) / dmax * dmin * 2
+        def build_vectors(dxr, dyr, dzr):
+            """Turns instantaneous real component arrays into scaled arrow vectors."""
+            dxr, dyr, dzr = dxr.copy(), dyr.copy(), dzr.copy()
+            if scalemode == "log":
+                dxr, dyr, dzr = _logscale(dxr, dyr, dzr)
+            dmax = np.max(_norm(dxr, dyr, dzr))
+            dmax = dmax if dmax != 0 else 1e-30
+            return scale * np.array([dxr, dyr, dzr]) / dmax * dmin * 2
+
+        Vec = build_vectors(dx_c.real, dy_c.real, dz_c.real)
 
         kwargs = dict()
-
         if color is not None:
             kwargs["color"] = self.set.theme.parse_color_name(color)
             kwargs["show_scalar_bar"] = False
@@ -1511,19 +1507,36 @@ class EMergeDisplay:
         grid = pv.StructuredGrid(x, y, z)
         grid.point_data["vectors"] = np.column_stack(Vec)
         grid.set_active_vectors("vectors")
-        arrows = grid.glyph(
-            orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5
-        )
+        arrows = grid.glyph(orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5)
 
-        pl = self._wrap_plot(
+        actor = self._wrap_plot(
             arrows,
             clim=None,
             cmap=cmap,
             scalar_bar_args=self._cbar_args,
             **kwargs,
         )
-        self._data_sets.append(pl.mapper.dataset)
+        self._data_sets.append(actor.mapper.dataset)
         self._reset_cbar()
+
+        if self._animate_next:
+
+            def on_update(obj: _AnimObject, phi: complex):
+                dxr = (dx_c * phi).real
+                dyr = (dy_c * phi).real
+                dzr = (dz_c * phi).real
+                Vec_t = build_vectors(dxr, dyr, dzr)
+                obj.grid.point_data["vectors"] = np.column_stack(Vec_t)
+                obj.grid.set_active_vectors("vectors")
+                new_arrows = obj.grid.glyph(
+                    orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5
+                )
+                obj.actor.GetMapper().SetInputData(new_arrows)
+                obj.actor.GetMapper().Modified()
+
+            # field slot is unused here (T slot too) — kept only to match _AnimObject's signature
+            self._objs.append(_AnimObject(None, None, grid, None, actor, on_update))
+            self._animate_next = False
 
     def add_clip_volume(
         self,

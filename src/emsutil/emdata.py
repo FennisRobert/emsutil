@@ -18,6 +18,211 @@ class DataStructure(Enum):
     UNSTRUCTURED = 5
 
 
+class VectorFieldMagnitudeProxy:
+    """A complex 3-component vector field that behaves like a scalar field.
+
+    Wraps three complex-valued arrays (Ex, Ey, Ez) representing a vector
+    field over a domain (e.g. an FEM solution), while deferring the
+    complex-magnitude reduction until it is actually needed. Array methods
+    (flatten, transpose, reshape, ...) and NumPy free functions
+    (np.nan_to_num, np.reshape, ...) are transparently forwarded to each
+    of the three components and reassembled into a new instance, so this
+    object can be dropped into a plotting pipeline written for a plain
+    scalar array without modification. Converting it via np.asarray(...)
+    or float ops collapses it to the real scalar magnitude field.
+
+    Attributes:
+        x (np.ndarray): Complex-valued field component along the first axis.
+        y (np.ndarray): Complex-valued field component along the second axis.
+        z (np.ndarray): Complex-valued field component along the third axis.
+    """
+
+    _PASSTHROUGH = {"shape", "ndim", "size", "dtype"}
+
+    def __init__(self, Ex, Ey, Ez):
+        """Initializes the field proxy from three complex component arrays.
+
+        Args:
+            Ex (np.ndarray): Complex-valued field component along x.
+            Ey (np.ndarray): Complex-valued field component along y.
+            Ez (np.ndarray): Complex-valued field component along z.
+
+        Returns:
+            None
+        """
+        self.x = np.asarray(Ex)
+        self.y = np.asarray(Ey)
+        self.z = np.asarray(Ez)
+
+    @staticmethod
+    def from_field(F):
+        """Builds a VectorFieldMagnitudeProxy from a solver field object.
+
+        Args:
+            F (_type_): A field object exposing .Ex, .Ey, .Ez complex arrays,
+                as typically returned by an FEM solver.
+
+        Returns:
+            VectorFieldMagnitudeProxy: A new proxy wrapping F's components.
+        """
+        return VectorFieldMagnitudeProxy(F.Ex, F.Ey, F.Ez)
+
+    def copy(self) -> "VectorFieldMagnitudeProxy":
+        """Creates a deep copy of the field proxy.
+
+        Args:
+            None
+
+        Returns:
+            VectorFieldMagnitudeProxy: A new instance with copied component arrays.
+        """
+        return VectorFieldMagnitudeProxy(self.x.copy(), self.y.copy(), self.z.copy())
+
+    def __array__(self, dtype=None):
+        """Converts the proxy to a plain NumPy array via its scalar magnitude.
+
+        Enables np.asarray(instance) and similar implicit conversions
+        (used by many third-party libraries, e.g. plotting tools) to
+        receive the real-valued magnitude field rather than a boxed object.
+
+        Args:
+            dtype (_type_, optional): Desired dtype of the returned array.
+                Defaults to None, in which case the natural dtype is kept.
+
+        Returns:
+            np.ndarray: The real-valued scalar magnitude field.
+        """
+        arr = self.scalar
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def __getattr__(self, name):
+        """Forwards unmatched attribute and method access to each component.
+
+        Descriptive attributes (shape, ndim, size, dtype) are passed
+        through directly from the x-component, since these describe the
+        array rather than holding per-component data. Callable attributes
+        (e.g. flatten, transpose, reshape) are applied to x, y, and z
+        individually and reassembled into a new proxy. Non-callable
+        attributes are forwarded the same way, wrapped as a new proxy.
+
+        Args:
+            name (str): Name of the attribute or method being accessed.
+
+        Returns:
+            _type_: The passthrough value, a forwarding callable, or a new
+                VectorFieldMagnitudeProxy, depending on what was requested.
+        """
+        if name.startswith("__") or name in ("x", "y", "z"):
+            raise AttributeError(name)
+
+        if name in self._PASSTHROUGH:
+            return getattr(self.x, name)
+
+        attr_x = getattr(self.x, name)
+        if callable(attr_x):
+            def forwarded(*args, **kwargs):
+                """Applies the forwarded method to each field component.
+
+                Args:
+                    *args (_type_): Positional arguments passed to the
+                        underlying method on each component.
+                    **kwargs (_type_): Keyword arguments passed to the
+                        underlying method on each component.
+
+                Returns:
+                    VectorFieldMagnitudeProxy: A new proxy holding the
+                        per-component results.
+                """
+                return VectorFieldMagnitudeProxy(
+                    getattr(self.x, name)(*args, **kwargs),
+                    getattr(self.y, name)(*args, **kwargs),
+                    getattr(self.z, name)(*args, **kwargs),
+                )
+            return forwarded
+        return VectorFieldMagnitudeProxy(attr_x, getattr(self.y, name), getattr(self.z, name))
+
+    def __array_function__(self, func, types, args, kwargs):
+        """Dispatches NumPy free functions (e.g. np.nan_to_num) per component.
+
+        Args:
+            func (_type_): The NumPy function being called (e.g. np.reshape).
+            types (_type_): Collection of argument types involved, as
+                supplied by NumPy's dispatch mechanism.
+            args (_type_): Positional arguments passed to the function,
+                with any VectorFieldMagnitudeProxy instances unwrapped
+                per component before the call.
+            kwargs (_type_): Keyword arguments passed through unchanged.
+
+        Returns:
+            VectorFieldMagnitudeProxy: A new proxy holding the per-component
+                results of applying func.
+        """
+        def unwrap(a, which):
+            return getattr(a, which) if isinstance(a, VectorFieldMagnitudeProxy) else a
+
+        x_args = [unwrap(a, "x") for a in args]
+        y_args = [unwrap(a, "y") for a in args]
+        z_args = [unwrap(a, "z") for a in args]
+
+        return VectorFieldMagnitudeProxy(
+            func(*x_args, **kwargs),
+            func(*y_args, **kwargs),
+            func(*z_args, **kwargs),
+        )
+
+    @property
+    def scalar(self) -> np.ndarray:
+        """Computes the real-valued Euclidean magnitude of the field.
+
+        Args:
+            None
+
+        Returns:
+            np.ndarray: sqrt(Re(x)^2 + Re(y)^2 + Re(z)^2) at each point.
+        """
+        return (self.x.real**2 + self.y.real**2 + self.z.real**2) ** 0.5
+
+    def __mul__(self, other):
+        """Computes the magnitude of the field scaled by a factor.
+
+        Typically used to apply a time-harmonic phase factor
+        (e.g. exp(-i*omega*t)) before reducing to a real scalar, for
+        animating field propagation.
+
+        Args:
+            other (_type_): Scalar or array multiplier, e.g. a complex
+                phase factor.
+
+        Returns:
+            np.ndarray: The real-valued magnitude of the scaled field.
+        """
+        return ((self.x*other).real**2 + (self.y*other).real**2 + (self.z*other).real**2) ** 0.5
+
+    def __rmul__(self, other):
+        """Computes the magnitude of the field scaled by a factor (reflected).
+
+        Args:
+            other (_type_): Scalar or array multiplier, e.g. a complex
+                phase factor.
+
+        Returns:
+            np.ndarray: The real-valued magnitude of the scaled field.
+        """
+        return self.__mul__(other)
+
+    @property
+    def real(self):
+        """Returns the real-valued magnitude field (alias for scalar * 1).
+
+        Args:
+            None
+
+        Returns:
+            np.ndarray: The real-valued scalar magnitude field.
+        """
+        return self * 1
+    
+
 @dataclass
 class FarFieldComponent(Saveable):
     F: np.ndarray
@@ -781,7 +986,7 @@ class EHField(Saveable):
 
     def scalar(
         self,
-        field: Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "normE", "normH"] | str,
+        field: Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "normE", "normH", "Emag","Hmag"] | str,
         metric: Literal["abs", "real", "imag", "complex"] = "real",
     ) -> FieldPlotData:
         """Returns the data X, Y, Z, Field based on the interpolation
@@ -796,7 +1001,11 @@ class EHField(Saveable):
             FieldPlotData: The plot data object
         """
         fieldname = field
-        if field in self.aux:
+        if field == "Emag":
+            field_arry = VectorFieldMagnitudeProxy(self.Ex, self.Ey, self.Ez)
+        elif field == "Hmag":
+            field_arry = VectorFieldMagnitudeProxy(self.Hx, self.Hy, self.Hx)
+        elif field in self.aux:
             field_arry = self.aux[field]
         else:
             field_arry = getattr(self, field)
