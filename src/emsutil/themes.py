@@ -311,6 +311,128 @@ class _Stylish(EMergeTheme):
             "#6C006AFF",
         ]
 
+class _DocumentFancy(EMergeTheme):
+    """A custom EMerge theme."""
+
+    def define(self):
+        self.backgroung_grad_1 = "#FFFFFF"
+        self.backgroung_grad_2 = "#FFFFFF"
+        self.grid_color = "#676767FF"
+        self.brightness = 1.0
+
+        self.label_color = "#FFFFFF"
+        self.text_color = "#000000FF"
+        self.render_pbr = True
+        self.line_width = 3.0
+
+        self.geo_edge_width = 3.0
+        self.geo_edge_color = "#000000ff"
+
+        self.draw_xax = False
+        self.draw_yax = False
+        self.draw_zax = False
+        self.draw_xplane = False
+        self.draw_yplane = False
+        self.draw_zplane = False
+        self.draw_xgrid = False
+        self.draw_ygrid = False
+        self.draw_zgrid = False
+
+        self.axis_color: str = "#194E74"
+        self.axis_x_color: str = "#f93c12"
+        self.axis_y_color: str = "#a2fb12"
+        self.axis_z_color: str = "#3b62ff"
+
+        # Grids
+        self.grid_color: str = "#d17711"
+        self.grid_width: float = 2
+        self.draw_pvgrid = False
+
+        # Labels
+        self.label_color: str = "#F5F5F5"
+        self.text_color: str = "#060606"
+
+        # Geometry
+        self.geo_edge_color: str = "#000000"
+        self.geo_edge_width: float = 2.0
+        self.geo_mesh_width: float = 1.0
+        self.geo_mesh_color: str = "#244673"
+
+        # Materials and rendering
+        self.render_shadows: bool = True
+        self.render_pbr: bool = True
+        self.render_style = "surface"
+        self.render_mesh: bool = False
+        self.render_metal_roughness: float = 0.3
+        self.render_min_opacity: float = 0.0
+
+        # Color modifiers
+        self.brightness: float = 1.0
+        self.bleding_sequence: list[tuple[str, str, float]] = []
+
+        # Colormaps
+        self.cmap_npts: int = 256
+        self.default_amplitude_colormap: str = "amplitude"
+        self.default_wave_colormap: str = "wave"
+
+        self.colormaps: dict[str, tuple[list[str], list[float]]] = {
+            "amplitude": (
+                ("#E395FF00", "#28BBEC58", "#A2FC3CB0", "#FF8426D6", "#E80D09"),
+                (0.0, 0.25, 0.5, 0.75, 1.0),
+            ),
+            "lightcloud": (
+                ("#E395FF00", "#28BBEC2E", "#A2FC3C49", "#FF9544AA", "#E80D09"),
+                (0.0, 0.25, 0.5, 0.75, 1.0),
+            ),
+            "wave": (
+                (
+                    "#D35C00",
+                    "#eb1c1cb6",
+                    "#FF000000",
+                    "#006EFF00",
+                    "#006EFFB7",
+                    "#00AFCE",
+                ),
+                (0.0, 0.4, 0.49, 0.51, 0.6, 1.0),
+            ),
+        }
+
+        self.line_color_cycle = [
+            "#8484ff",
+            "#ff7d7d",
+            "#73FF73",
+            "#FF5E94",
+            "#FFB06F",
+            "#65E8FF",
+        ]
+
+        self.color_name_map = {
+            "EMERGE-PEC": "#C14D0A",
+            "EMERGE-DIEL": "#55C955",
+            "EMERGE-COPPER": "#bb5710",
+            "EMERGE-SELECT": "#33a7ff",
+            "EMERGE-AIR": "#DEEBF400",
+            "EMERGE-TEXT": "#ACCDE5",
+        }
+        self.opacity_codes = {
+            "EMERGE-CONDUCTOR": 1.0,
+            "EMEREG-DIEL": 0.8,
+            "EMERGE-AIR": 0.01,
+            "EMERGE-SELECT": 0.8,
+            "EMERGE-SURF": 1.0,
+            "EMEREG-FFSURF": 1.0,
+        }
+
+        self.obj_3d_kwarg = dict()
+        self.farfield_3d_kwarg = dict(
+            lighting=True, smooth_shading=True, specular=0.7, diffuse=0.75, ambient=0.2
+        )
+        self.surf_kwargs = dict(lighting=True, diffuse=0.75, ambient=0.2, specular=0.7)
+        self.quiver_kwargs = dict(
+            tip_length=1.0,
+            tip_radius=0.1,
+        )
+
 
 class _GigawaveStudio(EMergeTheme):
     def define(self):
@@ -628,6 +750,7 @@ Vintage = _Vintage()
 Tron = _Tron()
 Document = _Document()
 Stylish = _Stylish()
+DocumentFancy = _DocumentFancy()
 GigawaveStudio = _GigawaveStudio()
 LFSS = _LFSS()
 EMV3 = _EMV3()

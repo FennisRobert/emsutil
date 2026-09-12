@@ -1769,6 +1769,7 @@ class EMergeDisplay:
                 )  # np.abs(np.linspace(-256.0, 256.0, 256))
             else:
                 opacity_array = np.linspace(0, 256, 256)
+                opacity_array = 256 * (opacity_array/256)**2
         else:
             opacity_array = opacity
 
