@@ -1,1 +1,1 @@
-from .display import EMergeDisplay, setdefault, cmap_names, _AnimObject
+from .display import EMergeDisplay, cmap_names, _AnimObject

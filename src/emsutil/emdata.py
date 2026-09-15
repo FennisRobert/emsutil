@@ -1024,7 +1024,7 @@ class EHField(Saveable):
                 x=self.x,
                 y=self.y,
                 z=self.z,
-                F=field_arry,
+                F=field,
                 structure=self.structure,
                 name=f"{metric} {fieldname}",
             )
@@ -1033,7 +1033,7 @@ class EHField(Saveable):
                 x=self.x,
                 y=self.y,
                 z=self.z,
-                F=field_arry,
+                F=field,
                 tris=self.aux["tris"],
                 structure=self.structure,
                 boundary=True,

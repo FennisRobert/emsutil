@@ -16,18 +16,19 @@
 # <https://www.gnu.org/licenses/>.
 
 from __future__ import annotations
-from .display_settings import PVDisplaySettings, EMergeTheme
 
 import time
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, Callable, Literal
+
 import numpy as np
 import pyvista as pv
-from typing import Literal, Callable, Any
 from loguru import logger
-from pathlib import Path
-from importlib.resources import files
-from .utils import determine_projection_data
-from ..emdata import FieldPlotData, DataStructure
 
+from ..emdata import DataStructure, FieldPlotData
+from .display_settings import EMergeTheme, PVDisplaySettings
+from .utils import determine_projection_data
 
 ### Color scale
 
@@ -109,25 +110,35 @@ def _min_distance(xs, ys, zs):
     closest_neighbor_distances = distances[:, 1]
     return float(np.min(closest_neighbor_distances))
 
+def ruler_snap_points(datasets):
+    """Collect vertices along sharp edges and boundaries."""
+    chunks = []
 
-def get_transformation(scale: Literal["log", "symlog", "lin"]) -> Callable:
-    """Return a transformation callable to transform a scalar
-    dataset according to a log, symmetric-log or linear scale.
+    for mesh in datasets:
+        if mesh.n_points == 0:
+            continue
 
-    Args:
-        scale (Literal[&quot;log&quot;, &quot;symlog&quot;, &quot;lin&quot;]): _description_
+        surface = mesh.extract_surface(algorithm="dataset_surface").clean()
 
-    Returns:
-        Callable: _description_
-    """
-    if scale == "log":
-        T = lambda x: np.log10(np.abs(x + 1e-12))
-    elif scale == "symlog":
-        T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-    else:
-        T = lambda x: x
-    return T
+        if surface.n_cells == 0:
+            points = surface.points
+        else:
+            edges = surface.extract_feature_edges(
+                feature_angle=30,
+                boundary_edges=True,
+                non_manifold_edges=True,
+                feature_edges=True,
+                manifold_edges=False,
+            )
+            points = edges.points
 
+        if len(points):
+            chunks.append(np.asarray(points))
+
+    if not chunks:
+        return np.empty((0, 3))
+
+    return np.unique(np.vstack(chunks), axis=0)
 
 class _RunState:
     def __init__(self):
@@ -147,21 +158,6 @@ class _RunState:
 
 
 ANIM_STATE = _RunState()
-
-
-def setdefault(options: dict, **kwargs) -> dict:
-    """Shorthand for overwriting non-existent keyword arguments with defaults
-
-    Args:
-        options (dict): The kwargs dict
-
-    Returns:
-        dict: the kwargs dict
-    """
-    for key in kwargs.keys():
-        if options.get(key, None) is None:
-            options[key] = kwargs[key]
-    return options
 
 
 def _logscale(dx, dy, dz):
@@ -247,7 +243,7 @@ class EMergeDisplay:
         self.set: PVDisplaySettings = PVDisplaySettings()
 
         # Animation options
-        self._facetags: list[int] = []
+        self._facetags: dict[int, str] = dict()
         self._stop: bool = False
         self._objs: list[_AnimObject] = []
         self._do_animate: bool = False
@@ -255,7 +251,7 @@ class EMergeDisplay:
         self._closed_via_x: bool = False
         self._Nsteps: int = 0
         self._fps: int = 25
-        self._ruler: ScreenRuler = ScreenRuler(self, 0.001)
+        self._ruler: ScreenRuler = ScreenRuler(self)
         self._selector: ScreenSelector = ScreenSelector(self)
         self._stop = False
         self._objs = []
@@ -320,10 +316,11 @@ class EMergeDisplay:
             return self.set.theme.parse_opacity(value)
 
     @staticmethod
-    def _awd(values: dict, default: dict) -> dict:
+    def _append_with_defaults(values: dict, *defaults: dict) -> dict:
         """Append with default. Overwrites detault dict entries with values"""
         out = dict()
-        out.update(default)
+        for default in defaults:
+            out.update(default)
         out.update(values)
         return out
 
@@ -338,7 +335,17 @@ class EMergeDisplay:
         interactive: bool = False,
         clim: tuple[float, float] | None = None,
     ) -> EMergeDisplay:
+        """Configure the colorbar settings for the next plot call to be made.
 
+        Args:
+            name (str): The name of the field quantity (shared between multiple plots of the same name)
+            n_labels (int, optional): The number of color-bar value labels. Defaults to 5.
+            interactive (bool, optional): If the colorbar should be set to interactive mode. Defaults to False.
+            clim (tuple[float, float] | None, optional): The color-limits (manual overwrite). Defaults to None.
+
+        Returns:
+            EMergeDisplay: This same object instance
+        """
         self._cbar_args = dict(
             title=name,
             n_labels=n_labels,
@@ -360,7 +367,7 @@ class EMergeDisplay:
         )
         defaults.update(kwargs)
 
-        self._cbar_args = self._awd(self._cbar_args, defaults)
+        self._cbar_args = self._append_with_defaults(self._cbar_args, defaults)
 
     def _wrap_plot(self, *args, **kwargs) -> pv.Actor:
         """Performs plot operations to handle Pyvistas behavior better"""
@@ -424,7 +431,7 @@ class EMergeDisplay:
         self._plot = pv.Plotter()
 
         self._plot.add_key_event("m", self.activate_ruler)  # type: ignore
-        self._plot.add_key_event("f", self.activate_object)  # type: ignore
+        self._plot.add_key_event("g", self.activate_object)  # type: ignore
         self._plot.add_key_event("x", self.view_x)  # type: ignore
         self._plot.add_key_event("y", self.view_y)  # type: ignore
         self._plot.add_key_event("z", self.view_z)  # type: ignore
@@ -489,9 +496,7 @@ class EMergeDisplay:
             self._plot.remove_actor(self.highlight_actor)
             self.highlight_actor = None
 
-        if self.highlight_text_actor is not None:
-            self._plot.remove_actor(self.highlight_text_actor)
-            self.highlight_text_actor = None
+        self._clear_highlight_text()
 
     def _highlight_object(self) -> None:
         """Removes the old highlight and draws a new glowing edge outline around the selected mesh."""
@@ -522,7 +527,7 @@ class EMergeDisplay:
                     "EMERGE-SELECT", self.set.theme.default_opacity
                 ),
             )
-            self.highlight_text_actor = self.add_text(name, position="upper_edge")
+            self._set_highlight_text(name)
 
         # 4. Force the plotter to re-render the scene immediately
         self._plot.render()
@@ -620,7 +625,6 @@ class EMergeDisplay:
         self._plot.off_screen = off_screen
         pv.OFF_SCREEN = off_screen
 
-        self._ruler.min_length = self._get_edge_length()
         self._update_camera()
         self._add_aux_items()
         self._apply_theme()
@@ -641,6 +645,74 @@ class EMergeDisplay:
                 self._plot.show()
 
         self._reset()
+
+    def _parse_cmap_name(self, cmap: str, default: str | None = None) -> str:
+        """Universal pipeline for cmap parsing
+
+        Args:
+            cmap (str): _description_
+
+        Returns:
+            str: _description_
+        """
+        if default is None:
+            default = self.set.theme.default_amplitude_cmap
+        if cmap is None:
+            cmap = default
+        elif isinstance(cmap, str):
+            cmap = self.set.theme.parse_cmap_name(cmap)
+        return cmap
+
+    def _parse_field_data(self, 
+                          V: np.ndarray, 
+                          value_scale: Literal['lin','log','symlog'], 
+                          symmetrize: bool, 
+                          clim: tuple[float, float] | None = None,
+                          clim_crop_factor: float = 1.0) -> tuple[tuple[float, float], str, Callable]:
+        """Does common processing operations amongst plot functions
+        including:
+         - Computing color limits
+         - Defining the default colormap
+         - Defining the quantity transformation T: R -> R
+
+        Args:
+            V (np.ndarray): _description_
+            symmetrize (bool): _description_
+
+        Returns:
+            tuple[np.ndarray, str]: _description_
+        """
+
+        # Sanitize and flatten
+        Vf = np.nan_to_num(V.flatten())
+
+        # Extract min and max
+        vmin, vmax = nanminmax(Vf.real)
+        vmin = vmin * clim_crop_factor
+        vmax = vmax * clim_crop_factor
+
+        default_cmap = self.set.theme.default_amplitude_cmap
+
+        if value_scale == "log":
+            T = lambda x: np.log10(np.abs(x + 1e-12))
+        elif value_scale == "symlog":
+            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
+        else:
+            T = lambda x: x
+
+        if symmetrize:
+            level = np.max(np.abs(Vf))
+            vmin, vmax = (-level, level)
+            default_cmap = self.set.theme.default_wave_cmap
+
+        if clim is None:
+            if self._cbar_lim is not None:
+                clim = self._cbar_lim
+                vmin, vmax = clim
+            else:
+                clim = (vmin, vmax)
+
+        return clim, default_cmap, T
 
     def _get_path(self, filename: str) -> str:
         """Generates a filename for the EMerge package directory in the PyVista folder
@@ -848,6 +920,15 @@ class EMergeDisplay:
         """Add a mesh and actor as selectable item."""
         self._selectable_objects[name] = dict(mesh=mesh, actor=actor)
 
+    def _clear_highlight_text(self) -> None:
+        if self.highlight_text_actor is not None:
+            self._plot.remove_actor(self.highlight_text_actor)
+            self.highlight_text_actor = None
+
+    def _set_highlight_text(self, text: str) -> None:
+        self._clear_highlight_text()
+        self.highlight_text_actor = self.add_text(text, abs_position=(0.5,0.85,0), center=True)
+
     def _add_obj(
         self,
         mesh_obj: pv.UnstructuredGrid,
@@ -916,23 +997,25 @@ class EMergeDisplay:
         opacity = max(self.set.theme.render_min_opacity, opacity)
 
         # Defining the default keyword arguments for PyVista
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            color=color,
-            opacity=opacity,
-            metallic=metallic,
-            pbr=pbr,
-            roughness=roughness,
-            line_width=line_width,
-            edge_color=edge_color,
-            show_edges=show_edges,
-            pickable=False,
-            smooth_shading=smooth_shading,
-            split_sharp_edges=True,
-            specular=specular,
-            ambient=ambient,
-            diffuse=diffuse,
-            style=style,
+            dict(
+                color=color,
+                opacity=opacity,
+                metallic=metallic,
+                pbr=pbr,
+                roughness=roughness,
+                line_width=line_width,
+                edge_color=edge_color,
+                show_edges=show_edges,
+                pickable=False,
+                smooth_shading=smooth_shading,
+                split_sharp_edges=True,
+                specular=specular,
+                ambient=ambient,
+                diffuse=diffuse,
+                style=style,
+            )
         )
 
         # Treat as black and white
@@ -1044,6 +1127,7 @@ class EMergeDisplay:
         clim_crop_factor: float = 1.0,
         symmetrize: bool = False,
         _fieldname: str | None = None,
+        smooth_shading: bool = False,
         **kwargs,
     ) -> pv.DataSet:
         """A generic method to add a field plot to the display. Depending on the field type, it will call the appropriate method.
@@ -1070,7 +1154,6 @@ class EMergeDisplay:
         if "title" not in self._cbar_args:
             self._cbar_args["title"] = field.name
 
-        smooth_shading = False
         if self._do_animate:
             smooth_shading = False
 
@@ -1203,18 +1286,17 @@ class EMergeDisplay:
 
         (¹): lin: f(x)=x, log: f(x)=log₁₀(|x|), symlog: f(x)=sgn(x)·log₁₀(1+|x·ln(10)|)
         """
+
+        clim, default_cmap, T = self._parse_field_data(field, scale, symmetrize, clim, clim_crop_factor)
+
         # Extract the fieldname
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
+        name = self._get_fieldname() if _fieldname is None else _fieldname
 
         # Create the structured grid objects
         grid = pv.StructuredGrid(x, y, z)
         field_flat = field.flatten(order="F")
 
         # Generate and transform the dataset
-        T = get_transformation(scale)
         static_field = T(np.real(field_flat))
 
         # Set the scalar field as grid and apply a NaN removal
@@ -1222,41 +1304,20 @@ class EMergeDisplay:
         grid[name] = static_field
         grid_no_nan = grid.threshold(scalars=name, all_scalars=True)
 
-        # Get the default colormap
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        # Determine color limits
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-            else:
-                fmin = np.nanmin(static_field) * clim_crop_factor
-                fmax = np.nanmax(static_field) * clim_crop_factor
-                clim = (fmin, fmax)
-
-        # Make the color limit symmetrical and pick the
-        # default symmetrical colormap
-        if symmetrize:
-            lim = max(abs(clim[0]), abs(clim[1]))
-            clim = (-lim, lim)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        # If no cmap is provided, pick the default.
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        cmap = self._parse_cmap_name(cmap, default=default_cmap)
 
         # Set default plot argument settings
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            cmap=cmap,
-            clim=clim,
-            opacity=self.parse_opacity(opacity, "EMERGE-SURF"),
-            pickable=False,
-            multi_colors=True,
+            self.set.theme.surf_kwargs,
+            dict(
+                cmap=cmap,
+                clim=clim,
+                opacity=self.parse_opacity(opacity, "EMERGE-SURF"),
+                pickable=False,
+                multi_colors=True,
+            )
         )
-        kwargs = self._awd(kwargs, self.set.theme.surf_kwargs)
 
         # Overwrite the color bar Title if no title exists
         self._cbar_defaults(title=name)
@@ -1322,55 +1383,27 @@ class EMergeDisplay:
         (¹): lin: f(x)=x, log: f(x)=log₁₀(|x|), symlog: f(x)=sgn(x)·log₁₀(1+|x·ln(10)|)
         """
 
+        clim, default_cmap, T = self._parse_field_data(field, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+
         grid = self._mesh_manual(np.array([x, y, z]), tris)
-
         field_flat = field.flatten(order="F")
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
         static_field = T(np.real(field_flat))
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
         grid[name] = static_field
 
-        default_cmap = self.set.theme.default_amplitude_cmap
-        # Determine color limits
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-            else:
-                fmin = np.nanmin(static_field) * clim_crop_factor
-                fmax = np.nanmax(static_field) * clim_crop_factor
-                clim = (fmin, fmax)
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        if symmetrize:
-            lim = max(abs(clim[0]), abs(clim[1]))
-            clim = (-lim, lim)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
-
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            cmap=cmap,
-            clim=clim,
-            opacity=opacity,
-            pickable=False,
-            multi_colors=True,
+            self.set.theme.surf_kwargs,
+            dict(
+                cmap=cmap,
+                clim=clim,
+                opacity=opacity,
+                pickable=False,
+                multi_colors=True,
+            )
         )
-        self._awd(kwargs, self.set.theme.surf_kwargs)
 
         self._cbar_defaults(title=name)
         actor = self._wrap_plot(
@@ -1419,6 +1452,7 @@ class EMergeDisplay:
             "right_edge",
             "left_edge",
         ] = "upper_right",
+        center: bool = False,
         abs_position: tuple[float, float, float] | None = None,
     ):
         """Adds text to the plot at a given position
@@ -1448,6 +1482,10 @@ class EMergeDisplay:
             viewport=viewport,
             **kwargs,
         )
+        if center:
+            prop = actor.GetTextProperty()
+            prop.SetJustificationToCentered()
+            prop.SetVerticalJustificationToCentered()
         return actor
 
     def add_quiver(
@@ -1474,12 +1512,7 @@ class EMergeDisplay:
         dz_c = dz.flatten()
 
         ids = np.invert(np.isnan(dx_c.real))
-
-        if cmap is None:
-            cmap = self.set.theme.default_amplitude_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
-
+        
         x, y, z = x[ids], y[ids], z[ids]
         dx_c, dy_c, dz_c = dx_c[ids], dy_c[ids], dz_c[ids]
 
@@ -1497,9 +1530,13 @@ class EMergeDisplay:
         Vec = build_vectors(dx_c.real, dy_c.real, dz_c.real)
 
         kwargs = dict()
+
+        # Turn Scalar bars off if a uniform color was supplied. Unique to Add Quiver.
         if color is not None:
             kwargs["color"] = self.set.theme.parse_color_name(color)
             kwargs["show_scalar_bar"] = False
+
+        cmap = self._parse_cmap_name(cmap)
 
         self._cbar_defaults(title=_fieldname)
 
@@ -1516,6 +1553,7 @@ class EMergeDisplay:
             scalar_bar_args=self._cbar_args,
             **kwargs,
         )
+
         self._data_sets.append(actor.mapper.dataset)
         self._reset_cbar()
 
@@ -1563,47 +1601,18 @@ class EMergeDisplay:
             symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
-        Vf = V.flatten()
-        Vf = np.nan_to_num(Vf)
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
+
         
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if symmetrize:
-            level = np.max(np.abs(Vf))
-            vmin, vmax = (-level, level)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
         grid[name] = T(np.real(field))
-        kwargs = self.set.theme.surf_kwargs
+
+        kwargs = self._append_with_defaults(dict(), self.set.theme.surf_kwargs)
 
         self._plot.add_mesh_clip_plane(
             grid,
@@ -1643,50 +1652,17 @@ class EMergeDisplay:
             symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
-        Vf = V.flatten()
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
-
-        Vf = np.nan_to_num(Vf)
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if symmetrize:
-            level = np.max(np.abs(T(Vf)))
-            vmin, vmax = (-level, level)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
         grid[name] = T(np.real(field))
 
         self._cbar_defaults(title=name)
-        levels = list(np.linspace(vmin, vmax, Nlevels))
+
+        levels = list(np.linspace(clim[0], clim[1], Nlevels))
         contour = grid.contour(isosurfaces=levels)
 
         kwargs = self.set.theme.contour_kwargs
@@ -1738,52 +1714,21 @@ class EMergeDisplay:
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
 
-        Vf = V.flatten()
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        Vf = np.nan_to_num(Vf)
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
+        # Create opacity scales
         if opacity is None:
             if symmetrize:
-                level = np.max(np.abs(T(Vf))) * clim_crop_factor
-                vmin, vmax = (-level, level)
-                default_cmap = self.set.theme.default_wave_cmap
                 opacity_array = 256 * np.abs(
                     1 - np.cos(np.linspace(-np.pi / 2, np.pi / 2, 256))
-                )  # np.abs(np.linspace(-256.0, 256.0, 256))
+                )
             else:
                 opacity_array = np.linspace(0, 256, 256)
                 opacity_array = 256 * (opacity_array/256)**2
         else:
             opacity_array = opacity
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
 
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
         y_coords = Y[:, 0, 0]  # Y varies along second axis
@@ -1798,6 +1743,7 @@ class EMergeDisplay:
             ),
             origin=(x_coords[0], y_coords[0], z_coords[0]),
         )
+        
         V = np.nan_to_num(V, nan=0.0)
         field = V.transpose(1, 0, 2).flatten(order="F")
         grid[name] = T(np.real(field))
@@ -1805,6 +1751,7 @@ class EMergeDisplay:
         self._cbar_defaults(title=name)
         kwargs = self.set.theme.cloud_kwargs
 
+        # Add to the plot
         actor = self._plot.add_volume(
             grid,
             scalars=name,
@@ -1844,7 +1791,7 @@ class EMergeDisplay:
         clim_crop_factor: float = 1.0,
         cmap: cmap_names | None = None,
         opacity: float = 0.25,
-        _fieldname: str | None = None,
+        _fieldname: str | None = 'RTData',
     ):
         """Adds a 3D volumetric cloud volume plot based on a 3D grid of X,Y,Z and field values
 
@@ -1856,44 +1803,21 @@ class EMergeDisplay:
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
 
+        # Data Pre Processing
         vx = vx.flatten()
         vx = np.nan_to_num(vx)
         vy = vy.flatten()
         vy = np.nan_to_num(vy)
         vz = vz.flatten()
         vz = np.nan_to_num(vz)
-
         norm = (np.abs(vx) ** 2 + np.abs(vy) ** 2 + np.abs(vz) ** 2) ** 0.5
-        vmin = np.min(norm) * clim_crop_factor
-        vmax = np.max(norm) * clim_crop_factor
 
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-        name = "RTData"
+        # Creating defaults
+        clim, default_cmap, T = self._parse_field_data(norm, scale, False, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
-
+        # Data processing for plotting
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
         y_coords = Y[:, 0, 0]  # Y varies along second axis
         z_coords = Z[0, 0, :]  # Z varies along third axis
@@ -1926,6 +1850,7 @@ class EMergeDisplay:
         else:
             source_center = None
             source_radius = None
+            
         sl = grid.streamlines(
             "vectors",
             n_points=200,
@@ -2300,7 +2225,7 @@ class ScreenSelector:
             actor = self.disp._plot.add_mesh(
                 grid,
                 opacity=0.001,
-                color="red",
+                color="blue",
                 pickable=True,
                 name=f"FaceTag_{grid._tag}",
             )
@@ -2308,29 +2233,10 @@ class ScreenSelector:
 
         def callback(actor: pv.Actor):
             key = int(actor.name.split("_")[1])
-            points = self.surfs[key]
-            xs = points[0, :]
-            ys = points[1, :]
-            zs = points[2, :]
-            meanx = np.mean(xs)
-            meany = np.mean(ys)
-            meanz = np.mean(zs)
-            data = (
-                meanx,
-                meany,
-                meanz,
-                min(xs),
-                min(ys),
-                min(zs),
-                max(xs),
-                max(ys),
-                max(zs),
-            )
-            encoded = self.encoder(data)  # type: ignore
-            print(f"Face code key={key}: ", encoded)
+            self.disp._set_highlight_text(self.disp._facetags.get(key, 'Unknown?'))
 
         self.disp._plot.enable_mesh_picking(
-            callback, style="surface", left_clicking=True, use_actor=True
+            callback, style="surface", color=self.disp.set.theme.parse_color_name('EMERGE-SELECT'), opacity=0.25, left_clicking=True, use_actor=True
         )
 
     def turn_off(self) -> None:
@@ -2348,14 +2254,14 @@ def _do_nothing(*args):
 
 
 class ScreenRuler:
-    def __init__(self, display: EMergeDisplay, min_length: float):
+    def __init__(self, display: EMergeDisplay):
         self.disp: EMergeDisplay = display
         self.points: list[tuple] = [(0, 0, 0), (0, 0, 0)]
         self.text: pv.Text | None = None
         self.ruler: Any = None
         self.state: bool = False
-        self.min_length: float = min_length
         self._call_coords: Callable = _do_nothing
+        self._snap_actor = None
 
     @freeze
     def toggle(self):
@@ -2366,15 +2272,62 @@ class ScreenRuler:
 
     @freeze
     def turn_on(self):
-        self.state = True
-        self.disp._plot.enable_point_picking(
-            self._add_point, left_clicking=True, tolerance=self.min_length
+        if self.state:
+            return
+
+        pl = self.disp._plot
+        points = ruler_snap_points(
+            info["mesh"]
+            for info in self.disp._selectable_objects.values()
+            if info["actor"].GetVisibility()
         )
+
+        if not len(points):
+            logger.info("No ruler snap points found.")
+            return
+
+        # Use add_mesh directly: don't register the snap cloud in _data_sets.
+        self._snap_actor = pl.add_mesh(
+            pv.PolyData(points),
+            name="_ruler_snap_points",
+            style="points",
+            color="orange",
+            point_size=12,
+            render_points_as_spheres=True,
+            lighting=False,
+            pickable=True,
+            reset_camera=False,
+        )
+
+        pl.enable_point_picking(
+            callback=self._add_point_callback,
+            picker="point",
+            left_clicking=True,
+            tolerance=0.01,
+            show_point=False,
+            show_message=False,
+            pickable_window=False,
+        )
+
+        # Only the snap cloud participates, even if other actors are pickable.
+        picker = pl.iren.picker
+        picker.InitializePickList()
+        picker.AddPickList(self._snap_actor)
+        picker.PickFromListOn()
+
+        self.state = True
+
 
     @freeze
     def turn_off(self):
+        pl = self.disp._plot
+        pl.disable_picking()
+
+        if self._snap_actor is not None:
+            pl.remove_actor(self._snap_actor, reset_camera=False)
+            self._snap_actor = None
+
         self.state = False
-        self.disp._plot.disable_picking()
 
     @property
     def dist(self) -> float:
@@ -2418,9 +2371,15 @@ class ScreenRuler:
             self._call_coords(x1, y1, x2, y2, z)
 
     @freeze
-    def _add_point(self, point: tuple[float, float, float]):
+    def _add_point_callback(self, point: tuple[float, float, float]):
         self.points = [point, self.points[0]]
         self.text = self.disp._plot.add_text(
-            self.measurement_string, position=self.middle, name="RulerText"
+            self.measurement_string, 
+            position=self.middle, 
+            name="RulerText",
         )
         self.set_ruler()
+
+        color = pv.Color(self.disp.set.theme.text_color).float_rgb
+        self.ruler.GetTitleTextProperty().SetColor(*color)
+        self.ruler.GetLabelTextProperty().SetColor(*color)
