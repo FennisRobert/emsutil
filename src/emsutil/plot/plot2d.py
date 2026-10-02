@@ -7,16 +7,29 @@ from cycler import cycler
 # _colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
 EMERGE_COLORS = [
+    "#271700",
     "#4052ff",
-    "#ff5a2e",
-    "#47b706",
-    "#a23df2",
+    "#dc441a",
+    "#51ad00",
+    "#8922dd",
     "#2800a5",
     "#e6308a",
     "#e89a08",
 ]
+
 EMERGE_CYCLER = cycler(color=EMERGE_COLORS)
 plt.rc("axes", prop_cycle=EMERGE_CYCLER)
+
+# A lone trace is drawn in the first color (black), multiple traces cycle through the rest
+SINGLE_COLOR = EMERGE_COLORS[0]
+MULTI_COLORS = EMERGE_COLORS[1:]
+
+
+def _trace_colors(n: int) -> list[str]:
+    """Return the colors for n traces: black for a single trace, the palette minus black otherwise."""
+    if n == 1:
+        return [SINGLE_COLOR]
+    return [MULTI_COLORS[i % len(MULTI_COLORS)] for i in range(n)]
 
 ggplot_styles = {
     "axes.edgecolor": "000000",
@@ -220,12 +233,15 @@ def plot(
     if transformation is not None:
         y_list = [trans(y_i) for trans, y_i in zip([transformation] * n_series, y_list)]
 
+    colors = _trace_colors(n_series)
+
     # Create plot
     fig, ax = plt.subplots()
     for i, y_i in enumerate(y_list):
         ax.plot(
             x,
             y_i,
+            color=colors[i],
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],
@@ -309,7 +325,7 @@ def smith(
     """
     # --- normalize S into a list of 1D complex arrays ---
     if isinstance(S, (list, tuple)):
-        Ss: List[np.ndarray] = [np.asarray(s).ravel() for s in S]
+        Ss: list[np.ndarray] = [np.asarray(s).ravel() for s in S]
     else:
         Ss = [np.asarray(S).ravel()]
 
@@ -330,9 +346,11 @@ def smith(
 
     # --- style parameters (broadcast as needed) ---
     markers_list = _broadcast(markers, "none", "markers")
-    colors_list = _broadcast(colors, None, "colors")
+    if colors is None:
+        colors_list = _trace_colors(n_traces)
+    else:
+        colors_list = _broadcast(colors, None, "colors")
     lw_list = _broadcast(linewidth, None, "linewidth")
-    labels_list: Optional[List[Optional[str]]]
 
     if labels is None:
         labels_list = None
@@ -341,7 +359,7 @@ def smith(
 
     # --- frequencies (broadcast as needed) ---
     if f is None:
-        fs_list: List[Optional[np.ndarray]] = [None for _ in range(n_traces)]
+        fs_list: list[np.ndarray | None] = [None for _ in range(n_traces)]
     else:
         if isinstance(f, (list, tuple)):
             if len(f) != n_traces:
@@ -496,10 +514,12 @@ def plot_sp(
         fs = f
 
     if linestyles is None:
-        linestyles = ["-" for _ in S]
+        linestyles = ["-" for _ in Ss]
 
     if colorcycle is None:
-        colorcycle = [i for i, S in enumerate(S)]
+        colors = _trace_colors(len(Ss))
+    else:
+        colors = [EMERGE_COLORS[cid % len(EMERGE_COLORS)] for cid in colorcycle]
 
     unitdivider: dict[str, float] = {"MHz": 1e6, "GHz": 1e9, "kHz": 1e3}
 
@@ -516,7 +536,7 @@ def plot_sp(
     minphase, maxphase = -180, 180
 
     maxy = 0
-    for f, s, ls, cid in zip(fs, Ss, linestyles, colorcycle):
+    for f, s, ls, color in zip(fs, Ss, linestyles, colors):
         # Calculate and plot magnitude in dB
         SdB = 20 * np.log10(
             np.abs(s)
@@ -528,7 +548,7 @@ def plot_sp(
             SdB,
             label="Magnitude (dB)",
             linestyle=ls,
-            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+            color=color,
         )
         if np.max(SdB) > maxy:
             maxy = np.max(SdB)
@@ -543,7 +563,7 @@ def plot_sp(
             phase,
             label="Phase (degrees)",
             linestyle=ls,
-            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+            color=color,
         )
 
         # Annotate level indicators if specified
@@ -645,10 +665,12 @@ def plot_vswr(
         fs = f
 
     if linestyles is None:
-        linestyles = ["-" for _ in S]
+        linestyles = ["-" for _ in Ss]
 
     if colorcycle is None:
-        colorcycle = [i for i, S in enumerate(S)]
+        colors = _trace_colors(len(Ss))
+    else:
+        colors = [EMERGE_COLORS[cid % len(EMERGE_COLORS)] for cid in colorcycle]
 
     unitdivider: dict[str, float] = {"MHz": 1e6, "GHz": 1e9, "kHz": 1e3}
 
@@ -662,7 +684,7 @@ def plot_vswr(
         fig, ax_swr = figdata
     maxy = 5
 
-    for f, s, ls, cid in zip(fs, Ss, linestyles, colorcycle):
+    for f, s, ls, color in zip(fs, Ss, linestyles, colors):
         # Calculate and plot magnitude in dB
         SWR = np.divide((1 + abs(s)), (1 - abs(s)))
         ax_swr.plot(
@@ -670,7 +692,7 @@ def plot_vswr(
             SWR,
             label="VSWR",
             linestyle=ls,
-            color=EMERGE_COLORS[cid % len(EMERGE_COLORS)],
+            color=color,
         )
         if np.max(SWR) > maxy:
             maxy = np.max(SWR)
@@ -781,6 +803,8 @@ def plot_ff(
     linestyles = _broadcast(linestyles, "-")
     markers = _broadcast(markers, None) if markers is not None else [None] * n_series
 
+    colors = _trace_colors(n_series)
+
     fig, ax = plt.subplots()
     for i, Ei in enumerate(E_list):
         theta = thetas[i]
@@ -790,6 +814,7 @@ def plot_ff(
         ax.plot(
             theta,
             mag,
+            color=colors[i],
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],
@@ -893,10 +918,12 @@ def plot_ff_polar(
             ylim_max = y2
 
     ax.set_ylim(ylim_min, ylim_max)
+    colors = _trace_colors(n_series)
     for i, Ei in enumerate(E_list):
         ax.plot(
             theta,
             Ei,
+            color=colors[i],
             linestyle=linestyles[i],
             linewidth=linewidth,
             marker=markers[i],

@@ -18,7 +18,9 @@ Thermal property units (SI, at ~20 °C unless noted):
     specific_heat [J/(kg·K)]  specific heat capacity at constant pressure
 """
 
-from .material import Material, AIR, COPPER, PEC
+import numpy as np
+
+from .material import Material, FreqDependent, AIR, COPPER, PEC
 from .const import C0, Z0, PI, EPS0, MU0
 
 EISO: float = (Z0 / (2 * PI)) ** 0.5
@@ -2503,6 +2505,233 @@ MU_METAL = Material(
     cond_thermal=10.9,
     density=8747,
     specific_heat=500,
+)
+
+
+############################################################
+#                        SILKSCREENS                       #
+############################################################
+
+_SM_K, _SM_RHO, _SM_CP = 0.25, 1500, 1100
+_SM_WHITE_RHO = 1700
+
+
+def _logf_table(freqs: list[float], values: list[float]) -> FreqDependent:
+    """Frequency dependent property interpolated linearly in log(f), clamped at the ends."""
+    logf = np.log10(np.asarray(freqs, dtype=float))
+    vals = np.asarray(values, dtype=float)
+    return FreqDependent(scalar=lambda f: np.interp(np.log10(f), logf, vals))
+
+
+# --- Generic LPI solder mask by colour (estimates for ~1-10 GHz) ---
+SILK_LPI_GREEN = Material(
+    er=3.6,
+    tand=0.025,
+    color="#1d7a3a",
+    opacity=0.7,
+    name="LPI Solder Mask (Green)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_DARKGREEN = Material(
+    er=3.6,
+    tand=0.025,
+    color="#0f4d26",
+    opacity=0.8,
+    name="LPI Solder Mask (Dark Green)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_RED = Material(
+    er=3.7,
+    tand=0.026,
+    color="#b3202a",
+    opacity=0.85,
+    name="LPI Solder Mask (Red)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_BLUE = Material(
+    er=3.7,
+    tand=0.026,
+    color="#1f4fa3",
+    opacity=0.85,
+    name="LPI Solder Mask (Blue)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_YELLOW = Material(
+    er=3.8,
+    tand=0.026,
+    color="#e3c21c",
+    opacity=0.85,
+    name="LPI Solder Mask (Yellow)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_PURPLE = Material(
+    er=3.7,
+    tand=0.026,
+    color="#5b2a86",
+    opacity=0.85,
+    name="LPI Solder Mask (Purple)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_BLACK = Material(
+    er=3.8,
+    tand=0.028,
+    color="#1a1a1a",
+    opacity=0.95,
+    name="LPI Solder Mask (Black)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_MATTE_BLACK = Material(
+    er=3.8,
+    tand=0.028,
+    color="#2b2b2b",
+    opacity=0.95,
+    name="LPI Solder Mask (Matte Black)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_WHITE = Material(
+    er=4.7,
+    tand=0.028,
+    color="#f2f2f2",
+    opacity=0.95,
+    name="LPI Solder Mask (White)",
+    cond_thermal=_SM_K,
+    density=_SM_WHITE_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LPI_CLEAR = Material(
+    er=3.4,
+    tand=0.022,
+    color="#e8e4c9",
+    opacity=0.2,
+    name="LPI Solder Mask (Clear)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+
+# --- Product solder masks (datasheet values) ---
+# Taiyo PSR-4000 BN: Dk/Df at 1 MHz; expect ~5-10 % lower Dk at GHz. SG 1.39.
+SILK_TAIYO_PSR4000BN_GREEN = Material(
+    er=4.5,
+    tand=0.029,
+    color="#1f8a3f",
+    opacity=0.7,
+    name="Taiyo PSR-4000 BN (Green)",
+    cond_thermal=_SM_K,
+    density=1390,
+    specific_heat=_SM_CP,
+)
+SILK_TAIYO_PSR4000BN_DARKGREEN = Material(
+    er=4.5,
+    tand=0.029,
+    color="#0f4d26",
+    opacity=0.8,
+    name="Taiyo PSR-4000 BN DG (Dark Green)",
+    cond_thermal=_SM_K,
+    density=1390,
+    specific_heat=_SM_CP,
+)
+# Taiyo PSR-4000 GP01EU: Dk 3.5, Df 0.022 at 1 GHz. SG 1.5, Tg 130 °C.
+SILK_TAIYO_PSR4000GP01_DARKGREEN = Material(
+    er=3.5,
+    tand=0.022,
+    color="#11552b",
+    opacity=0.8,
+    name="Taiyo PSR-4000 GP01EU (Dark Green)",
+    cond_thermal=_SM_K,
+    density=1500,
+    specific_heat=_SM_CP,
+)
+# Taiyo PSR-4000 AUS703: Dk 4.0/3.8/3.6/3.3 at 1 MHz/1/5/10 GHz, Df 0.026-0.027.
+SILK_TAIYO_PSR4000AUS703_GREEN = Material(
+    er=_logf_table([1e6, 1e9, 5e9, 10e9], [4.0, 3.8, 3.6, 3.3]),
+    tand=_logf_table([1e6, 5e9], [0.026, 0.027]),
+    color="#1d7a3a",
+    opacity=0.7,
+    name="Taiyo PSR-4000 AUS703 (Green)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+# Taiyo PSR-4000 WT02: Dk 6.7, Df 0.032 at 1 MHz (7.4 / 0.050 after 7 days at 90% RH).
+SILK_TAIYO_PSR4000WT02_WHITE = Material(
+    er=6.7,
+    tand=0.032,
+    color="#f5f5f5",
+    opacity=0.95,
+    name="Taiyo PSR-4000 WT02 (White)",
+    cond_thermal=_SM_K,
+    density=_SM_WHITE_RHO,
+    specific_heat=_SM_CP,
+)
+# Peters Elpemer 2467: Dk ~3.7 at 1 MHz, Df ~0.029 at 1-100 MHz.
+SILK_PETERS_ELPEMER2467_GREEN = Material(
+    er=3.7,
+    tand=0.029,
+    color="#2e8b3e",
+    opacity=0.6,
+    name="Peters Elpemer 2467 (Green Transparent)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_PETERS_ELPEMER2467_BLACK = Material(
+    er=3.8,
+    tand=0.030,
+    color="#1a1a1a",
+    opacity=0.95,
+    name="Peters Elpemer 2467 (Black)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+
+# --- Legend / marking inks (screen printed or inkjet epoxy, estimates) ---
+SILK_LEGEND_WHITE = Material(
+    er=4.5,
+    tand=0.030,
+    color="#ffffff",
+    opacity=1.0,
+    name="Legend Ink (White)",
+    cond_thermal=_SM_K,
+    density=_SM_WHITE_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LEGEND_BLACK = Material(
+    er=3.9,
+    tand=0.030,
+    color="#111111",
+    opacity=1.0,
+    name="Legend Ink (Black)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
+)
+SILK_LEGEND_YELLOW = Material(
+    er=4.0,
+    tand=0.030,
+    color="#f2d21b",
+    opacity=1.0,
+    name="Legend Ink (Yellow)",
+    cond_thermal=_SM_K,
+    density=_SM_RHO,
+    specific_heat=_SM_CP,
 )
 
 ############################################################

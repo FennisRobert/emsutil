@@ -696,29 +696,30 @@ class _EMV3(EMergeTheme):
                 (0.0, 0.25, 0.5, 0.75, 1.0),
             ),
             "wave": (
-                (
+                (   "#FFCA37",
                     "#FF8426",
                     "#eb1c1cb6",
                     "#FF000000",
                     "#006EFF00",
                     "#006EFFB7",
                     "#28DFFF",
+                    "#28FFCD",
                 ),
-                (0.0, 0.4, 0.49, 0.51, 0.6, 1.0),
+                (0.0, 0.1, 0.3, 0.49, 0.51, 0.7, 0.9, 1.0),
             ),
         }
 
         self.line_color_cycle = [
             "#8484ff",
             "#ff7d7d",
-            "#73FF73",
-            "#FF5E94",
+            "#84FF84",
+            "#FF7EA9",
             "#FFB06F",
             "#65E8FF",
         ]
 
         self.color_name_map = {
-            "EMERGE-PEC": "#C14D0A",
+            "EMERGE-PEC": "#B6490A",
             "EMERGE-DIEL": "#55C955",
             "EMERGE-COPPER": "#bb5710",
             "EMERGE-SELECT": "#33a7ff",

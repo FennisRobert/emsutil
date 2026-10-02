@@ -1721,7 +1721,7 @@ class EMergeDisplay:
         # Create opacity scales
         if opacity is None:
             if symmetrize:
-                opacity_array = 256 * np.abs(
+                opacity_array = 255 * np.abs(
                     1 - np.cos(np.linspace(-np.pi / 2, np.pi / 2, 256))
                 )
             else:
