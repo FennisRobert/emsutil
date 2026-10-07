@@ -698,10 +698,10 @@ class _EMV3(EMergeTheme):
             "wave": (
                 (   "#FFCA37",
                     "#FF8426",
-                    "#eb1c1cb6",
+                    "#b90000b6",
                     "#FF000000",
                     "#006EFF00",
-                    "#006EFFB7",
+                    "#002DD0B7",
                     "#28DFFF",
                     "#28FFCD",
                 ),

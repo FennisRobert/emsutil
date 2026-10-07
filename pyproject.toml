@@ -18,6 +18,12 @@ dependencies = [
     "scipy>=1.14.0",
 ]
 
+[project.optional-dependencies]
+record = [
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.5",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

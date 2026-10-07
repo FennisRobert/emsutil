@@ -810,7 +810,8 @@ def plot_ff(
         theta = thetas[i]
         mag = np.abs(Ei)
         if dB:
-            mag = 20 * np.log10(mag)
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                mag = 20 * np.log10(mag)
         ax.plot(
             theta,
             mag,

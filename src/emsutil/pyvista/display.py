@@ -18,15 +18,22 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
+from functools import wraps
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterable, Iterator, Literal
 
 import numpy as np
 import pyvista as pv
 from loguru import logger
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from vtkmodules.vtkCommonDataModel import vtkPolyData
+from vtkmodules.vtkCommonExecutionModel import vtkTrivialProducer
+from vtkmodules.vtkRenderingCore import vtkActor2D, vtkProp3D
+from vtkmodules.vtkRenderingLabel import vtkLabelPlacementMapper
 
-from ..emdata import DataStructure, FieldPlotData
+from ..emdata import DataStructure, FieldPlotData, VectorFieldMagnitudeProxy
 from .display_settings import EMergeTheme, PVDisplaySettings
 from .utils import determine_projection_data
 
@@ -81,7 +88,7 @@ def nanminmax(arr):
 
 # Data processing
 
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, cKDTree
 
 
 def _min_distance(xs, ys, zs):
@@ -110,11 +117,147 @@ def _min_distance(xs, ys, zs):
     closest_neighbor_distances = distances[:, 1]
     return float(np.min(closest_neighbor_distances))
 
-def ruler_snap_points(datasets):
-    """Collect vertices along sharp edges and boundaries."""
+def _mean_distance(xs, ys, zs, n_samples: int = 2000, seed: int = 0):
+    """Approximates the mean nearest-neighbour distance in a point cloud.
+
+    The KD-Tree is built on all points (needed for correct neighbour distances),
+    but only a random subset of ``n_samples`` points is queried. Building is
+    O(N log N) with fast settings; querying is O(n_samples log N), so the cost
+    is dominated by the build even for very large datasets.
+
+    Parameters:
+    -----------
+    xs, ys, zs : np.ndarray
+        Coordinate arrays of equal length N.
+    n_samples : int
+        Number of query points used to estimate the mean.
+    seed : int
+        Seed for the sample selection (keeps results reproducible).
+
+    Returns:
+    --------
+    float
+        The (approximate) mean distance from a point to its nearest neighbour.
+    """
+    points = np.column_stack((xs, ys, zs)).astype(np.float64, copy=False)
+    N = len(points)
+
+    if N < 2:
+        return 0.0
+
+    tree = cKDTree(points, balanced_tree=False, compact_nodes=False)
+
+    if N > n_samples:
+        idx = np.random.default_rng(seed).choice(N, size=n_samples, replace=False)
+        query = points[idx]
+    else:
+        query = points
+
+    distances, _ = tree.query(query, k=2)
+    return float(np.mean(distances[:, 1]))
+
+def _resample_unstructured(field: FieldPlotData, npts: int = 50) -> FieldPlotData:
+    """Linearly interpolates an unstructured scalar point cloud onto a regular grid.
+
+    The largest axis is sampled with ``npts`` points, the other axes with the same
+    spacing. If all points lie in an axis-aligned plane, a GRID2D dataset is returned
+    with NaN outside the convex hull (which add_surf removes). Otherwise a GRID3D
+    dataset is returned with zeros outside the convex hull. Complex values are
+    preserved so the result can still be animated.
+
+    Parameters:
+    -----------
+    field : FieldPlotData
+        An UNSTRUCTURED dataset with scalar values F.
+    npts : int
+        Number of sample points along the largest axis.
+
+    Returns:
+    --------
+    FieldPlotData
+        The resampled GRID2D or GRID3D dataset.
+    """
+    from scipy.interpolate import LinearNDInterpolator
+
+    pts = np.column_stack(
+        (np.ravel(field.x), np.ravel(field.y), np.ravel(field.z))
+    ).astype(np.float64)
+
+    # A magnitude proxy would collapse to a real array when interpolated, losing
+    # the phase needed for animation. Interpolate its components instead.
+    is_proxy = isinstance(field.F, VectorFieldMagnitudeProxy)
+    if is_proxy:
+        F = np.column_stack(
+            (np.ravel(field.F.x), np.ravel(field.F.y), np.ravel(field.F.z))
+        )
+    else:
+        F = np.ravel(field.F)
+
+    pmin = pts.min(axis=0)
+    pmax = pts.max(axis=0)
+    span = pmax - pmin
+    active = span > 1e-9 * span.max()
+    ds = span.max() / (npts - 1)
+
+    axes = [
+        np.linspace(pmin[i], pmax[i], max(round(span[i] / ds) + 1, 2))
+        if active[i]
+        else np.array([pmin[i]])
+        for i in range(3)
+    ]
+    X, Y, Z = np.meshgrid(*axes)
+    grid_pts = np.column_stack((X.ravel(), Y.ravel(), Z.ravel()))
+
+    if active.sum() == 3:
+        fill = 0.0
+        structure = DataStructure.GRID3D
+    elif active.sum() == 2:
+        fill = np.nan
+        structure = DataStructure.GRID2D
+    else:
+        raise ValueError(
+            f"Cannot resample {field.name}: the points must span a plane or a volume."
+        )
+
+    interp = LinearNDInterpolator(pts[:, active], F, fill_value=fill)
+    Fi = interp(grid_pts[:, active])
+
+    if is_proxy:
+        comps = [Fi[:, i].reshape(X.shape) for i in range(3)]
+    else:
+        comps = [Fi.reshape(X.shape)]
+
+    if structure == DataStructure.GRID2D:
+        # Drop the singleton axis of the flat dimension
+        X, Y, Z = (A.squeeze() for A in (X, Y, Z))
+        comps = [C.squeeze() for C in comps]
+
+    Fgrid = VectorFieldMagnitudeProxy(*comps) if is_proxy else comps[0]
+
+    return FieldPlotData(x=X, y=Y, z=Z, F=Fgrid, structure=structure, name=field.name)
+
+def _prop_matrix(prop: vtkProp3D) -> np.ndarray:
+    """The 4x4 model-to-world matrix of an actor (position, orientation, scale, user matrix)."""
+    return pv.array_from_vtkmatrix(prop.GetMatrix())
+
+
+def _to_world(prop: vtkProp3D, points: np.ndarray) -> np.ndarray:
+    """Maps (N,3) dataset points of an actor to world coordinates."""
+    M = _prop_matrix(prop)
+    return np.asarray(points) @ M[:3, :3].T + M[:3, 3]
+
+
+def _to_local(prop: vtkProp3D, points: np.ndarray) -> np.ndarray:
+    """Maps (N,3) world points to the dataset coordinates of an actor."""
+    M = np.linalg.inv(_prop_matrix(prop))
+    return np.asarray(points) @ M[:3, :3].T + M[:3, 3]
+
+
+def ruler_snap_points(objects: Iterable[tuple[pv.DataSet, vtkProp3D]]):
+    """Collect vertices along sharp edges and boundaries in world coordinates."""
     chunks = []
 
-    for mesh in datasets:
+    for mesh, actor in objects:
         if mesh.n_points == 0:
             continue
 
@@ -133,7 +276,7 @@ def ruler_snap_points(datasets):
             points = edges.points
 
         if len(points):
-            chunks.append(np.asarray(points))
+            chunks.append(_to_world(actor, points))
 
     if not chunks:
         return np.empty((0, 3))
@@ -237,6 +380,107 @@ class _AnimObject:
         self.on_update(self, phi)
 
 
+def _address(obj: Any) -> str:
+    """Identifies a VTK object. Pyvista may hand out new Python wrappers for the same actor,
+    so id() is not stable."""
+    return obj.GetAddressAsString("vtkObject")
+
+
+def _label_points(actor: vtkActor2D) -> vtkPolyData | None:
+    """The source point data of a point label actor (upstream of any visibility filters)."""
+    algorithm = actor.GetMapper().GetInputAlgorithm()
+    while algorithm is not None and algorithm.GetNumberOfInputConnections(0) > 0:
+        upstream = algorithm.GetInputAlgorithm()
+        if isinstance(upstream, vtkTrivialProducer):
+            return algorithm.GetInputDataObject(0, 0)
+        algorithm = upstream
+    return None
+
+
+class _PlotItem:
+    """All actors created by one plot call, such as a geometry with its edge lines and labels.
+
+    The item is the unit that is exploded, picked, highlighted and saved.
+    """
+
+    def __init__(self, props: list[vtkProp3D] | None = None):
+        self.props: list[vtkProp3D] = [] if props is None else props
+        # Point data of label actors. Labels are 2D actors anchored at these world points.
+        self.labels: list[vtkPolyData] = []
+
+        # Selection data, set through EMergeDisplay._add_selectable
+        self.name: str | None = None
+        self.mesh: pv.DataSet | None = None
+        self.actor: vtkProp3D | None = None
+
+    def collect(self, actors: Iterable[Any]) -> None:
+        """Adds the 3D actors and point labels among actors to this item."""
+        for actor in actors:
+            if isinstance(actor, vtkProp3D):
+                self.props.append(actor)
+            elif isinstance(actor, vtkActor2D) and isinstance(
+                actor.GetMapper(), vtkLabelPlacementMapper
+            ):
+                points = _label_points(actor)
+                if points is not None:
+                    self.labels.append(points)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.props and not self.labels
+
+    @property
+    def datasets(self) -> list[pv.DataSet]:
+        """The unique datasets rendered by the actors of this item."""
+        datasets = dict()
+        for prop in self.props:
+            mapper = getattr(prop, "mapper", None)
+            dataset = getattr(mapper, "dataset", None)
+            if dataset is not None:
+                datasets.setdefault(dataset.memory_address, dataset)
+        return list(datasets.values())
+
+    def center(self) -> np.ndarray | None:
+        """The world space center of the bounding box, None if the item has no geometry."""
+        points = [
+            np.reshape(prop.GetBounds(), (3, 2)).T
+            for prop in self.props
+            if prop.GetBounds()[0] <= prop.GetBounds()[1]
+        ]
+        points += [
+            vtk_to_numpy(label.GetPoints().GetData())
+            for label in self.labels
+            if label.GetNumberOfPoints() > 0
+        ]
+        if not points:
+            return None
+        points = np.vstack(points)
+        return (points.min(axis=0) + points.max(axis=0)) / 2
+
+    def translate(self, offset: np.ndarray) -> None:
+        """Moves the item by offset through the actor transforms. The plotted data is not changed."""
+        for prop in self.props:
+            prop.AddPosition(*offset)
+        for label in self.labels:
+            points = vtk_to_numpy(label.GetPoints().GetData())
+            points += offset
+            label.GetPoints().Modified()
+
+
+def plot_item(method: Callable) -> Callable:
+    """Decorator for plot methods: everything the call adds becomes one _PlotItem.
+
+    Calls nested inside another decorated call join the outer item.
+    """
+
+    @wraps(method)
+    def wrapper(self: EMergeDisplay, *args, **kwargs):
+        with self._item():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class EMergeDisplay:
     def __init__(self, *args, **kwargs):
 
@@ -251,11 +495,11 @@ class EMergeDisplay:
         self._closed_via_x: bool = False
         self._Nsteps: int = 0
         self._fps: int = 25
+        self._orbit: dict | None = None
         self._ruler: ScreenRuler = ScreenRuler(self)
         self._selector: ScreenSelector = ScreenSelector(self)
-        self._stop = False
-        self._objs = []
-        self._data_sets: list[pv.DataSet] = []
+        self._items: list[_PlotItem] = []
+        self._current_item: _PlotItem | None = None
 
         self._plot: pv.Plotter | None = None
         self._generate_plotter()
@@ -268,17 +512,12 @@ class EMergeDisplay:
         self.highlight_actor = None
         self.highlight_text_actor = None
         self._cycle_pos: int = 0
-        self._obj_cycler: list[str] = []
-        self._selectable_objects: dict[str:dict] = dict()
+        self._obj_cycler: list[_PlotItem] = []
 
         self._bounds: tuple[float, float, float, float, float, float] | None = None
         self._cbar_args: dict = {}
         self._cbar_lim: tuple[float, float] | None = None
         self.camera_position = (1, -1, 1)  # +X, +Z, -Y
-
-        self._plot.track_click_position(
-            callback=self._on_click, side="right", viewport=True
-        )
 
         self.__post_init__(*args, **kwargs)
 
@@ -324,13 +563,86 @@ class EMergeDisplay:
         out.update(values)
         return out
 
+    def _get_logo_path(self) -> str | None:
+        """Optional return of a logo path
+
+        Returns:
+            str | None: _description_
+        """
+        return self.set.theme.logo_path
     ############################################################
     #                        GENERIC METHODS                   #
     ############################################################
 
+    @contextmanager
+    def explode(
+        self,
+        ds: tuple[float, float, float] | np.ndarray = (0, 0, 0.004),
+        tol: float | None = None,
+    ) -> Iterator[EMergeDisplay]:
+        """Explodes everything plotted inside the with-block along the direction of ds.
+
+        Plotted items are sorted by the position of their center along ds and grouped into
+        layers. Layer k (starting at 0) is displaced by k*ds. Only the actor transforms are
+        changed so the underlying data, animation and picking remain intact.
+
+        Example:
+            >>> with display.explode(ds=(0, 0, 0.004)):
+            ...     display.add_object(...)
+
+        Args:
+            ds (tuple[float, float, float] | np.ndarray): The displacement between two
+                consecutive layers. Defaults to (0, 0, 0.004).
+            tol (float | None): Items whose center lies within tol of the previous item
+                along ds share a layer. Defaults to 0.1% of the spread of all items.
+        """
+        n_items = len(self._items)
+        before = {_address(actor) for actor in self._plot.renderer.actors.values()}
+        try:
+            yield self
+        finally:
+            items = self._items[n_items:]
+
+            # Actors added outside of a plot item are exploded on their own
+            known = before | {_address(prop) for item in items for prop in item.props}
+            items += [
+                _PlotItem([actor])
+                for actor in self._plot.renderer.actors.values()
+                if isinstance(actor, vtkProp3D) and _address(actor) not in known
+            ]
+            self._explode_items(items, np.asarray(ds, dtype=float), tol)
+
+    @staticmethod
+    def _explode_items(
+        items: list[_PlotItem], ds: np.ndarray, tol: float | None
+    ) -> None:
+        """Displaces each item by k*ds where k is the index of its layer along ds."""
+        length = np.linalg.norm(ds)
+        if length == 0:
+            return
+
+        centered = [(item, item.center()) for item in items]
+        centered = [(item, center) for item, center in centered if center is not None]
+        if not centered:
+            return
+
+        items = [item for item, _ in centered]
+        keys = np.array([center @ ds / length for _, center in centered])
+        if tol is None:
+            tol = 1e-3 * (keys.max() - keys.min())
+
+        order = np.argsort(keys)
+        layer = 0
+        previous = keys[order[0]]
+        for i in order:
+            if keys[i] - previous > tol:
+                layer += 1
+            previous = keys[i]
+            items[i].translate(layer * ds)
+
     def cbar(
         self,
-        name: str,
+        name: str | bool | None,
         n_labels: int = 5,
         interactive: bool = False,
         clim: tuple[float, float] | None = None,
@@ -346,6 +658,10 @@ class EMergeDisplay:
         Returns:
             EMergeDisplay: This same object instance
         """
+        if name in (None, False):
+            self._cbar_args = dict(show=False)
+            return self
+        
         self._cbar_args = dict(
             title=name,
             n_labels=n_labels,
@@ -373,20 +689,54 @@ class EMergeDisplay:
         """Performs plot operations to handle Pyvistas behavior better"""
 
         # Scalar bars are handled separately in order to make font size changes work
-        if "scalar_bar_args" in kwargs and kwargs.get("show_scalar_bar", True):
-            sbarargs = kwargs.pop("scalar_bar_args")
+        if "scalar_bar_args" in kwargs:
+            sbargs = kwargs.pop("scalar_bar_args")
         else:
-            sbarargs = None
-
+            sbargs = None
+            
         # Make the plot call without scalar bar
         kwargs["show_scalar_bar"] = False
         actor = self._plot.add_mesh(*args, **kwargs)
 
         # Add the scalar bar separately.
-        if sbarargs is not None:
-            self._plot.add_scalar_bar(**sbarargs)
-        self._data_sets.append(actor.mapper.dataset)
+        if sbargs is not None and sbargs.get('show', True):
+            if 'show' in sbargs:
+                sbargs.pop('show')
+            self._plot.add_scalar_bar(**sbargs)
         return actor
+
+    @contextmanager
+    def _item(self) -> Iterator[_PlotItem]:
+        """Collects all actors added inside the block into one _PlotItem.
+
+        Nested blocks join the outermost item.
+        """
+        if self._current_item is not None:
+            yield self._current_item
+            return
+
+        item = _PlotItem()
+        self._current_item = item
+        before = {_address(actor) for actor in self._plot.renderer.actors.values()}
+        try:
+            yield item
+        finally:
+            self._current_item = None
+            item.collect(
+                actor
+                for actor in self._plot.renderer.actors.values()
+                if _address(actor) not in before
+            )
+            if not item.is_empty or item.name is not None:
+                self._items.append(item)
+
+    @property
+    def _data_sets(self) -> list[pv.DataSet]:
+        return [dataset for item in self._items for dataset in item.datasets]
+
+    @property
+    def _selectable_items(self) -> list[_PlotItem]:
+        return [item for item in self._items if item.name is not None]
 
     def _reset_cbar(self) -> None:
         self._cbar_args: dict = {}
@@ -439,6 +789,9 @@ class EMergeDisplay:
         self._plot.add_key_event("i", self.view_iso)
         self._plot.add_key_event("Right", self._on_next_obj)
         self._plot.add_key_event("Left", self._on_prev_obj)
+        self._plot.track_click_position(
+            callback=self._on_click, side="right", viewport=True
+        )
 
     def _on_click(self, click_pos):
         x, y = click_pos
@@ -457,28 +810,28 @@ class EMergeDisplay:
         ray_end = np.array(renderer.GetWorldPoint()[:3])
 
         hits = []
-        for name, info in self._selectable_objects.items():
-            mesh = info["mesh"]
-            actor = info["actor"]
+        for item in self._selectable_items:
+            mesh = item.mesh
+            actor = item.actor
             if not isinstance(mesh, pv.PolyData):
                 surface = mesh.extract_surface(algorithm="dataset_surface")
             else:
                 surface = mesh
 
-            points, cells = surface.ray_trace(ray_start, ray_end)
+            local_start, local_end = _to_local(actor, np.array([ray_start, ray_end]))
+            points, cells = surface.ray_trace(local_start, local_end)
             if len(points) > 0:
-                point = points[0, :]
+                point = _to_world(actor, points[:1])[0]
                 distance = np.linalg.norm(point - ray_start)
-                hits.append((distance, name))
+                hits.append((distance, item))
 
         hits.sort(key=lambda x: x[0])
 
         self._cycle_pos = 0
         self._obj_cycler = []
-        if hits:
-            for dist, name in hits:
-                print(f" -> {name} (distance: {dist:.2f})")
-                self._obj_cycler.append(name)
+        for dist, item in hits:
+            print(f" -> {item.name} (distance: {dist:.2f})")
+            self._obj_cycler.append(item)
 
         self._highlight_object()
 
@@ -504,8 +857,8 @@ class EMergeDisplay:
         if len(self._obj_cycler) == 0:
             return
 
-        name = self._obj_cycler[self._cycle_pos % len(self._obj_cycler)]
-        mesh_data = self._selectable_objects[name]["mesh"]
+        item = self._obj_cycler[self._cycle_pos % len(self._obj_cycler)]
+        mesh_data = item.mesh
 
         self._clear_highlight()
 
@@ -527,7 +880,8 @@ class EMergeDisplay:
                     "EMERGE-SELECT", self.set.theme.default_opacity
                 ),
             )
-            self._set_highlight_text(name)
+            self.highlight_actor.user_matrix = _prop_matrix(item.actor)
+            self._set_highlight_text(item.name)
 
         # 4. Force the plotter to re-render the scene immediately
         self._plot.render()
@@ -619,8 +973,15 @@ class EMergeDisplay:
         """
         self.set.theme = theme
 
-    def show(self, screenshot: str | None = None, off_screen: bool = False):
-        """Shows the Pyvista display."""
+    def show(self, screenshot: str | None = None, off_screen: bool = False, zoom: float = 1.0):
+        """Shows the Pyvista display.
+
+        Args:
+            screenshot (str | None, optional): If given, saves a screenshot to this file instead of opening a window. Defaults to None.
+            off_screen (bool, optional): Render without opening a window. Defaults to False.
+            zoom (float, optional): Camera zoom factor applied to the default view; values above 1 zoom in.
+                Also applies to screenshots and orbit recordings. Defaults to 1.0.
+        """
 
         self._plot.off_screen = off_screen
         pv.OFF_SCREEN = off_screen
@@ -629,7 +990,13 @@ class EMergeDisplay:
         self._add_aux_items()
         self._apply_theme()
 
-        if self._do_animate and screenshot is None:
+        if zoom != 1.0:
+            self._plot.camera.zoom(zoom)
+            self._plot.reset_camera_clipping_range()
+
+        if self._orbit is not None and self._orbit["record"] is not None and screenshot is None:
+            self._record(self._orbit["record"])
+        elif (self._do_animate or self._orbit is not None) and screenshot is None:
             self._wire_close_events()
             self.add_text("Press Q to close!", color="red", position="upper_left")
             self._plot.show(
@@ -805,14 +1172,15 @@ class EMergeDisplay:
         self._stop = False
         self._objs = []
         self._animate_next = False
-        self._data_sets = []
+        self._orbit = None
+        self._items = []
+        self._current_item = None
         self._bwdrawing = False
         self._reset_cbar()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
         self._cycle_pos: int = 0
-        self._obj_cycler: list[str] = []
-        self._selectable_objects: dict[str:dict] = dict()
+        self._obj_cycler: list[_PlotItem] = []
         pv.OFF_SCREEN = False
 
     def _close_callback(self, arg):
@@ -842,11 +1210,7 @@ class EMergeDisplay:
             now = time.perf_counter()
             if now >= next_tick:
                 step = (step + 1) % steps
-                phi = np.exp(1j * (step / steps) * 2 * np.pi)
-
-                # update all animated objects
-                for aobj in self._objs:
-                    aobj.update(phi)
+                self._advance_frame(step, steps)
 
                 # draw one frame
                 self._plot.render()
@@ -860,6 +1224,108 @@ class EMergeDisplay:
             time.sleep(0.001)
         # ensure cleanup pathway runs once
         self._close_callback(None)
+
+    def _advance_frame(self, step: int, steps: int) -> None:
+        """Advances the field animation phase and the camera orbit by one frame."""
+        if self._objs:
+            phi = np.exp(1j * (step / steps) * 2 * np.pi)
+            for aobj in self._objs:
+                aobj.update(phi)
+
+        if self._orbit is not None:
+            self._rotate_camera(360.0 / self._orbit["n_frames"], self._orbit["axis"])
+
+    def _rotate_camera(self, angle_deg: float, axis: np.ndarray) -> None:
+        """Rotates the camera position and up-vector around an axis through the focal point."""
+        cam = self._plot.camera
+        k = axis / np.linalg.norm(axis)
+        a = np.deg2rad(angle_deg)
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        R = np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+
+        fp = np.array(cam.focal_point)
+        cam.position = tuple(fp + R @ (np.array(cam.position) - fp))
+        cam.up = tuple(R @ np.array(cam.up))
+        self._plot.reset_camera_clipping_range()
+
+    def _record(self, filename: str) -> None:
+        """Renders the orbit off-screen and writes every frame to a GIF or movie file."""
+        self._plot.off_screen = True
+        pv.OFF_SCREEN = True
+
+        # Video encoders work on 16x16 pixel blocks; other sizes get rescaled (and blurred)
+        width, height = self._orbit["window_size"]
+        self._plot.window_size = [16 * round(width / 16), 16 * round(height / 16)]
+
+        fps = self._orbit["fps"]
+        try:
+            if Path(filename).suffix.lower() == ".gif":
+                self._plot.open_gif(filename, fps=fps)
+            else:
+                self._plot.open_movie(filename, framerate=fps, quality=self._orbit["quality"])
+        except ImportError as e:
+            raise ImportError(
+                "Recording requires imageio (GIF) and imageio-ffmpeg (MP4): "
+                "pip install emsutil[record]"
+            ) from e
+
+        steps = max(1, int(self._Nsteps))
+        total = self._orbit["n_frames"] * self._orbit["loops"]
+        for frame in range(total):
+            self._advance_frame((frame + 1) % steps, steps)
+            self._plot.write_frame()
+
+        self._plot.mwriter.close()
+        self._plot.mwriter = None
+        logger.info(f"Saved orbit recording to {filename}")
+
+    def orbit(
+        self,
+        n_frames: int = 180,
+        fps: int = 30,
+        axis: Literal["x", "y", "z"] | tuple[float, float, float] = "z",
+        record: str | None = None,
+        loops: int = 1,
+        window_size: tuple[int, int] = (1920, 1088),
+        quality: int = 10,
+    ) -> EMergeDisplay:
+        """Makes the camera orbit around the geometry when the display is shown.
+
+        Can be combined with animate() so the field animates while the camera orbits.
+        This method can be method chained.
+
+        Args:
+            n_frames (int, optional): Frames per full 360° revolution. Defaults to 180.
+            fps (int, optional): Frames per second. Defaults to 30.
+            axis (Literal["x","y","z"] | tuple, optional): The world axis to orbit around. Defaults to "z".
+            record (str | None, optional): If given, renders off-screen and saves the orbit to this file
+                (.gif, or a movie format such as .mp4) instead of opening a window. Defaults to None.
+            loops (int, optional): Number of revolutions to record. Defaults to 1.
+            window_size (tuple[int, int], optional): Recording resolution in pixels (width, height), rounded
+                to multiples of 16. Defaults to (1920, 1088).
+            quality (int, optional): Movie encoding quality from 0 to 10 (ignored for GIF). Defaults to 10.
+
+        Returns:
+            EMergeDisplay: The same EMergeDisplay object
+
+        Example:
+        >>> display.orbit(record="orbit.mp4").add_field(...)
+        >>> display.show()
+        """
+        if isinstance(axis, str):
+            axis = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis]
+
+        self._orbit = dict(
+            n_frames=max(1, int(n_frames)),
+            fps=fps,
+            axis=np.array(axis, dtype=float),
+            record=record,
+            loops=max(1, int(loops)),
+            window_size=window_size,
+            quality=min(max(int(quality), 0), 10),
+        )
+        self._fps = fps
+        return self
 
     def _get_fieldname(self) -> str:
         """
@@ -917,8 +1383,17 @@ class EMergeDisplay:
         return pv.UnstructuredGrid(cells, celltypes, points)
 
     def _add_selectable(self, mesh: pv.UnstructuredGrid, actor: pv.Actor, name: str):
-        """Add a mesh and actor as selectable item."""
-        self._selectable_objects[name] = dict(mesh=mesh, actor=actor)
+        """Makes the plot item of actor selectable under name, picked by ray tracing mesh."""
+        item = self._current_item
+        if item is None:
+            item = next(
+                (it for it in self._items if _address(actor) in map(_address, it.props)),
+                None,
+            )
+        if item is None:
+            item = _PlotItem([actor])
+            self._items.append(item)
+        item.name, item.mesh, item.actor = name, mesh, actor
 
     def _clear_highlight_text(self) -> None:
         if self.highlight_text_actor is not None:
@@ -929,6 +1404,7 @@ class EMergeDisplay:
         self._clear_highlight_text()
         self.highlight_text_actor = self.add_text(text, abs_position=(0.5,0.85,0), center=True)
 
+    @plot_item
     def _add_obj(
         self,
         mesh_obj: pv.UnstructuredGrid,
@@ -1059,6 +1535,9 @@ class EMergeDisplay:
             kwargs2["ambient"] = 0.6
             kwargs2["opacity"] = opacity
             kwargs2["render_lines_as_tubes"] = False
+            # Pyvista names actors after their dataset by default and replaces actors
+            # with the same name, which would remove this overlay in the next call.
+            kwargs2["name"] = f"{type(mesh_obj).__name__}({mesh_obj.memory_address})-edges"
 
             kwargs["show_edges"] = False
 
@@ -1104,6 +1583,7 @@ class EMergeDisplay:
             logger.debug(f"Saved VTK object to {filename}.")
         logger.info("VTK saving complete!")
 
+    @plot_item
     def add_scatter(self, xs: np.ndarray, ys: np.ndarray, zs: np.ndarray):
         """Adds a scatter point cloud
 
@@ -1113,9 +1593,9 @@ class EMergeDisplay:
             zs (np.ndarray): The Z-coordinate
         """
         cloud = pv.PolyData(np.array([xs, ys, zs]).T)
-        self._data_sets.append(cloud)
         self._plot.add_points(cloud)
 
+    @plot_item
     def add_field(
         self,
         field: FieldPlotData,
@@ -1126,6 +1606,8 @@ class EMergeDisplay:
         voltype: Literal["cloud", "contour", "clip"] = "cloud",
         clim_crop_factor: float = 1.0,
         symmetrize: bool = False,
+        quiver_scale: float = 1.0,
+        resample_npts: int = 50,
         _fieldname: str | None = None,
         smooth_shading: bool = False,
         **kwargs,
@@ -1145,6 +1627,7 @@ class EMergeDisplay:
             clipplane (bool, optional): If a 3D grid plot should be done including a clip plane. Defaults to false.
             clim_crop_factor (float, optional): A multiplier for the default clim limits. If this value is 0.5, the clim limits will be divided by half to zoom in on the color range.
             symmetrize (bool, optional): If the colorscale should be symmetrized. Defaults to False.
+            resample_npts (int, optional): Grid points along the largest axis when resampling unstructured scalar data onto a regular grid. Defaults to 50.
             _fieldname (str | None, optional): A name for the field. Defaults to None.
 
         Returns:
@@ -1158,23 +1641,37 @@ class EMergeDisplay:
             smooth_shading = False
 
         if field.structure == DataStructure.TRISURF:
-            self.add_trisurf(
-                field.x,
-                field.y,
-                field.z,
-                field.F,
-                field.tris,
-                scale=scale,
-                cmap=cmap,
-                clim=clim,
-                opacity=opacity,
-                symmetrize=symmetrize,
-                clim_crop_factor=clim_crop_factor,
-                _fieldname=_fieldname,
-                smooth_shading=smooth_shading,
-                **kwargs,
-            )
-            return
+            if field._is_quiver:
+                self.add_quiver(
+                    field.x,
+                    field.y,
+                    field.z,
+                    field.vx,
+                    field.vy,
+                    field.vz,
+                    scale=quiver_scale,
+                    scalemode=scale,
+                    **kwargs,
+                )
+                return
+            else:
+                self.add_trisurf(
+                    field.x,
+                    field.y,
+                    field.z,
+                    field.F,
+                    field.tris,
+                    scale=scale,
+                    cmap=cmap,
+                    clim=clim,
+                    opacity=opacity,
+                    symmetrize=symmetrize,
+                    clim_crop_factor=clim_crop_factor,
+                    _fieldname=_fieldname,
+                    smooth_shading=smooth_shading,
+                    **kwargs,
+                )
+                return
         if field._is_quiver:
             self.add_quiver(
                 field.x,
@@ -1183,10 +1680,13 @@ class EMergeDisplay:
                 field.vx,
                 field.vy,
                 field.vz,
+                scale=quiver_scale,
                 scalemode=scale,
                 **kwargs,
             )
             return
+        if field.structure == DataStructure.UNSTRUCTURED:
+            field = _resample_unstructured(field, resample_npts)
         if field.structure == DataStructure.GRID2D:
             self.add_surf(
                 field.x,
@@ -1255,6 +1755,7 @@ class EMergeDisplay:
             f"I have no clue how to plot dataset {field} with structure {field.structure}"
         )
 
+    @plot_item
     def add_surf(
         self,
         x: np.ndarray,
@@ -1344,6 +1845,7 @@ class EMergeDisplay:
         self._reset_cbar()
         return grid_no_nan
 
+    @plot_item
     def add_trisurf(
         self,
         x: np.ndarray,
@@ -1488,6 +1990,7 @@ class EMergeDisplay:
             prop.SetVerticalJustificationToCentered()
         return actor
 
+    @plot_item
     def add_quiver(
         self,
         x: np.ndarray,
@@ -1516,7 +2019,7 @@ class EMergeDisplay:
         x, y, z = x[ids], y[ids], z[ids]
         dx_c, dy_c, dz_c = dx_c[ids], dy_c[ids], dz_c[ids]
 
-        dmin = _min_distance(x, y, z)
+        dmin = _mean_distance(x, y, z)
 
         def build_vectors(dxr, dyr, dzr):
             """Turns instantaneous real component arrays into scaled arrow vectors."""
@@ -1534,7 +2037,7 @@ class EMergeDisplay:
         # Turn Scalar bars off if a uniform color was supplied. Unique to Add Quiver.
         if color is not None:
             kwargs["color"] = self.set.theme.parse_color_name(color)
-            kwargs["show_scalar_bar"] = False
+            self._cbar_args['show'] = False
 
         cmap = self._parse_cmap_name(cmap)
 
@@ -1554,7 +2057,6 @@ class EMergeDisplay:
             **kwargs,
         )
 
-        self._data_sets.append(actor.mapper.dataset)
         self._reset_cbar()
 
         if self._animate_next:
@@ -1576,6 +2078,7 @@ class EMergeDisplay:
             self._objs.append(_AnimObject(None, None, grid, None, actor, on_update))
             self._animate_next = False
 
+    @plot_item
     def add_clip_volume(
         self,
         X: np.ndarray,
@@ -1626,6 +2129,7 @@ class EMergeDisplay:
 
         self._reset_cbar()
 
+    @plot_item
     def add_contour(
         self,
         X: np.ndarray,
@@ -1689,6 +2193,7 @@ class EMergeDisplay:
             self._animate_next = False
         self._reset_cbar()
 
+    @plot_item
     def add_cloud(
         self,
         X: np.ndarray,
@@ -1723,7 +2228,7 @@ class EMergeDisplay:
             if symmetrize:
                 opacity_array = 255 * np.abs(
                     1 - np.cos(np.linspace(-np.pi / 2, np.pi / 2, 256))
-                )
+                )**0.85
             else:
                 opacity_array = np.linspace(0, 256, 256)
                 opacity_array = 256 * (opacity_array/256)**2
@@ -1777,6 +2282,7 @@ class EMergeDisplay:
             self._animate_next = False
         self._reset_cbar()
 
+    @plot_item
     def add_streamline(
         self,
         X: np.ndarray,
@@ -1864,7 +2370,8 @@ class EMergeDisplay:
             sl,
             cmap=cmap,
             pickable=False,
-            scalar_bar_args=self._cbar_args**kwargs,
+            scalar_bar_args=self._cbar_args,
+            **kwargs,
         )
 
         self._reset_cbar()
@@ -2277,16 +2784,16 @@ class ScreenRuler:
 
         pl = self.disp._plot
         points = ruler_snap_points(
-            info["mesh"]
-            for info in self.disp._selectable_objects.values()
-            if info["actor"].GetVisibility()
+            (item.mesh, item.actor)
+            for item in self.disp._selectable_items
+            if item.actor.GetVisibility()
         )
 
         if not len(points):
             logger.info("No ruler snap points found.")
             return
 
-        # Use add_mesh directly: don't register the snap cloud in _data_sets.
+        # Added outside of a plot item, so the snap cloud is not saved or exploded.
         self._snap_actor = pl.add_mesh(
             pv.PolyData(points),
             name="_ruler_snap_points",

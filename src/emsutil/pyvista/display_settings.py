@@ -27,6 +27,23 @@ class _Cycler:
         self._i = 0
 
 
+GLOBAL_COLORMAPS = {
+    "classic": (
+        [
+            "#323b98",
+            "#4154a6",
+            "#4d73b7",
+            "#73c6e8",
+            "#8dc8a7",
+            "#b7d35e",
+            "#f5ee51",
+            "#e99740",
+            "#da4831",
+            "#892725",
+        ],
+        (0.0, 0.1, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 1.0),
+    ),
+}
 DEFAULT_CNAME_MAP = {
     "EMERGE-PEC": "#ff78aa",
     "EMERGE-DIEL": "#10ad10",
@@ -170,6 +187,9 @@ class EMergeTheme:
         self.streamline_kwarg: dict = dict()
         self.text_kwarg = dict()
 
+        # logo
+        self.logo_path: str | None = None
+        
         self.define()
         self._init()
 
@@ -196,9 +216,15 @@ class EMergeTheme:
 
     def parse_cmap_name(self, name: str) -> LinearSegmentedColormap | str:
         """Returns a colormap by name if it exists."""
-        if name not in self.colormaps:
+        if name not in self.colormaps and name not in GLOBAL_COLORMAPS:
             return name
-        return make_colormap(*self.colormaps[name], N=self.cmap_npts)
+        
+        if name in self.colormaps:
+            cmap_data = self.colormaps[name]
+        else:
+            cmap_data = GLOBAL_COLORMAPS[name]
+        
+        return make_colormap(*cmap_data, N=self.cmap_npts)
 
     def parse_opacity(self, value: str | float) -> float:
         """Parses an opacity value or string to a float"""

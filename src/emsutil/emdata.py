@@ -986,7 +986,8 @@ class EHField(Saveable):
 
     def scalar(
         self,
-        field: Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "normE", "normH", "Emag","Hmag"] | str,
+        field: Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz", "normE", "normH",
+                       "Emag", "Hmag", "Dmag", "Bmag", "Pmag", "Jsmag", "Jvmag", "Smag", "Smmag"] | str,
         metric: Literal["abs", "real", "imag", "complex"] = "real",
     ) -> FieldPlotData:
         """Returns the data X, Y, Z, Field based on the interpolation
@@ -1001,30 +1002,34 @@ class EHField(Saveable):
             FieldPlotData: The plot data object
         """
         fieldname = field
-        if field == "Emag":
-            field_arry = VectorFieldMagnitudeProxy(self.Ex, self.Ey, self.Ez)
-        elif field == "Hmag":
-            field_arry = VectorFieldMagnitudeProxy(self.Hx, self.Hy, self.Hx)
-        elif field in self.aux:
+        if field in self.aux:
             field_arry = self.aux[field]
+        elif field.endswith("mag") and hasattr(self, f"{field[:-3]}x"):
+            # Any vector quantity <V> with components <V>x, <V>y, <V>z supports "<V>mag"
+            base = field[:-3]
+            field_arry = VectorFieldMagnitudeProxy(
+                getattr(self, f"{base}x"),
+                getattr(self, f"{base}y"),
+                getattr(self, f"{base}z"),
+            )
         else:
             field_arry = getattr(self, field)
 
         if metric == "abs":
-            field = np.abs(field_arry)
+            field_arry = np.abs(field_arry)
         elif metric == "real":
-            field = field_arry.real
+            field_arry = field_arry.real
         elif metric == "imag":
-            field = field_arry.imag
+            field_arry = field_arry.imag
         elif metric == "complex":
-            field = field_arry
+            pass
 
         if "boundary" not in self.aux:
             return FieldPlotData(
                 x=self.x,
                 y=self.y,
                 z=self.z,
-                F=field,
+                F=field_arry,
                 structure=self.structure,
                 name=f"{metric} {fieldname}",
             )
@@ -1033,7 +1038,7 @@ class EHField(Saveable):
                 x=self.x,
                 y=self.y,
                 z=self.z,
-                F=field,
+                F=field_arry,
                 tris=self.aux["tris"],
                 structure=self.structure,
                 boundary=True,
