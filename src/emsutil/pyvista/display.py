@@ -35,6 +35,7 @@ from vtkmodules.vtkRenderingLabel import vtkLabelPlacementMapper
 
 from ..emdata import DataStructure, FieldPlotData, VectorFieldMagnitudeProxy
 from .display_settings import EMergeTheme, PVDisplaySettings
+from .dither import apply_dither
 from .utils import determine_projection_data
 
 ### Color scale
@@ -235,6 +236,84 @@ def _resample_unstructured(field: FieldPlotData, npts: int = 50) -> FieldPlotDat
     Fgrid = VectorFieldMagnitudeProxy(*comps) if is_proxy else comps[0]
 
     return FieldPlotData(x=X, y=Y, z=Z, F=Fgrid, structure=structure, name=field.name)
+
+# Colour that each direction axis lights up in add_vector_cloud
+_AXIS_COLORS = {
+    "r": (1.0, 0.0, 0.0),
+    "g": (0.0, 1.0, 0.0),
+    "b": (0.0, 0.0, 1.0),
+    "c": (0.0, 1.0, 1.0),
+    "m": (1.0, 0.0, 1.0),
+    "y": (1.0, 1.0, 0.0),
+}
+
+
+def _direction_rgba(
+    V: np.ndarray,
+    alpha_fn: Callable[[np.ndarray], np.ndarray],
+    color_mapping: tuple[str, str, str],
+    vivid: bool,
+    gamma: float = 0.8,
+) -> np.ndarray:
+    """Maps real vectors to RGBA colours: the direction axis sets the colour, magnitude the alpha.
+
+    Each direction axis lights up its own colour, weighted by the absolute value of that
+    component of the unit direction, so a direction and its opposite share a colour (with the
+    default mapping x is red, y green and z blue, and in-between directions mix). The colour
+    shows the axis a field points along, independent of its sign, so field rotation shows as
+    a colour shift.
+
+    Parameters:
+    -----------
+    V : np.ndarray
+        Real vectors of shape (N, 3).
+    alpha_fn : Callable
+        Maps the vector magnitudes to alpha values between 0 and 1.
+    color_mapping : tuple[str, str, str]
+        The colour for the x, y and z axis from r, g, b, c, m and y, e.g. ("r", "g", "b") or
+        ("c", "m", "y"). The three colours must be linearly independent.
+    vivid : bool
+        Scales the strongest channel to full brightness, so every direction is equally bright.
+        Otherwise in-between directions are dimmer, and only mixes that would exceed full
+        brightness are scaled down.
+    gamma : float
+        Exponent on the direction weights before mixing. With 1 the hue changes slowly near
+        the axes and quickly near the diagonals, so axis colours dominate; 0.8 spreads the hue
+        almost evenly over the angle (within 2 degrees).
+
+    Returns:
+    --------
+    np.ndarray
+        RGBA values of shape (N, 4) as uint8.
+    """
+    if len(color_mapping) != 3 or any(c not in _AXIS_COLORS for c in color_mapping):
+        raise ValueError(
+            f"color_mapping must give three colours from r, g, b, c, m and y, e.g. ('r', 'g', 'b'). Got {color_mapping}."
+        )
+    # Columns are the colours of the x, y and z axis
+    M = np.array([_AXIS_COLORS[c] for c in color_mapping]).T
+    if abs(np.linalg.det(M)) < 1e-9:
+        raise ValueError(
+            f"The colours in color_mapping {color_mapping} are not independent (one is a mix of the other two), "
+            "so different directions would get the same colour."
+        )
+
+    mag = np.linalg.norm(V, axis=1)
+    u = (np.abs(V) / np.where(mag > 0, mag, 1.0)[:, None]) ** gamma
+
+    # Element-wise instead of u @ M.T: matmul on macOS Accelerate emits spurious divide-by-zero warnings
+    rgb = (u[:, :, None] * M.T[None, :, :]).sum(axis=1)
+    # Mixed colours (e.g. cyan + magenta) can exceed full brightness, scale those back down
+    peak = rgb.max(axis=1)
+    if vivid:
+        rgb = rgb / np.maximum(peak, 1e-12)[:, None]
+    else:
+        rgb = rgb / np.maximum(peak, 1.0)[:, None]
+
+    alpha = np.clip(alpha_fn(mag), 0.0, 1.0)
+    rgba = np.column_stack((rgb, alpha))
+    return np.round(255 * rgba).astype(np.uint8)
+
 
 def _prop_matrix(prop: vtkProp3D) -> np.ndarray:
     """The 4x4 model-to-world matrix of an actor (position, orientation, scale, user matrix)."""
@@ -972,6 +1051,7 @@ class EMergeDisplay:
             theme (EMergeTheme): The theme to set.
         """
         self.set.theme = theme
+        pv.global_theme.font.family = theme.text_font
 
     def show(self, screenshot: str | None = None, off_screen: bool = False, zoom: float = 1.0):
         """Shows the Pyvista display.
@@ -1140,6 +1220,7 @@ class EMergeDisplay:
                 bounds[5] + ds,
             )
             pv.global_theme.font.fmt = "%.3f"
+            pv.global_theme.font.family = self.set.theme.text_font
             actor = self._plot.show_grid(
                 bounds=bounds, color=self.set.theme.text_color, fmt="%.3f"
             )
@@ -1149,7 +1230,13 @@ class EMergeDisplay:
         pv.global_theme.colorbar_horizontal.width = 0.4
         pv.global_theme.colorbar_vertical.height = 0.15
 
-        if self.set.theme.aa_active:
+        if self.set.theme.render_dither:
+            # Anti-aliasing would blend the black and white dots into grey
+            self._plot.disable_anti_aliasing()
+            for actor in self._plot.renderer.actors.values():
+                if isinstance(actor, pv.Actor):
+                    apply_dither(actor, self.set.theme.dither_cell, self.set.theme.dither_levels)
+        elif self.set.theme.aa_active:
             self._plot.enable_anti_aliasing(
                 self.set.theme.aa_mode, multi_samples=self.set.theme.aa_samples
             )
@@ -1495,13 +1582,21 @@ class EMergeDisplay:
         )
 
         # Treat as black and white
+        silhouette = None
         if not self._colorize:
             kwargs["pbr"] = False
             kwargs["roughness"] = 0.0
             kwargs["metallic"] = 0.0
             kwargs["opacity"] = 0.0
             kwargs["color"] = (1, 1, 1)
-            kwargs["silhouette"] = dict(color="black", line_width=3.0)
+            silhouette = dict(color="black", line_width=3.0)
+        elif self.set.theme.render_silhouette:
+            # Outline plus sharp edges; the outline follows the camera
+            silhouette = dict(
+                color=self.set.theme.geo_edge_color,
+                line_width=self.set.theme.geo_edge_width,
+                feature_angle=self.set.theme.silhouette_angle,
+            )
 
         # Add a texture if it is specified
         if texture is not None and texture != "None":
@@ -1546,11 +1641,27 @@ class EMergeDisplay:
         # Finally plot the mesh object.
         actor = self._wrap_plot(mesh_obj, *args, **kwargs)
 
-        # Push 3D Geometries back to avoid Z-fighting with 2D geometries.
-        if obj_dim == 3:
+        # The silhouette filter uses the point order of each face to tell front from back.
+        # Meshes with mixed face orientation (common in FEM meshes) would get false edges
+        # between oppositely oriented faces, so it is fed a consistently oriented surface.
+        if silhouette is not None and not plot_mesh:
+            surface = mesh_obj.extract_surface()
+            if surface.n_cells > 0:
+                if surface.faces.size > 0:
+                    surface = surface.compute_normals(
+                        consistent_normals=True, cell_normals=True, point_normals=False
+                    )
+                self._plot.add_silhouette(surface, **silhouette)
+
+        # Avoid Z-fighting by layering coincident surfaces in depth, front to back:
+        # edge/silhouette lines (VTK default line offset), fields, 2D geometry, 3D geometry.
+        # Each layer is one (factor, units) step of (1, 0.5) behind the one in front.
+        if obj_dim in (2, 3):
             mapper = actor.GetMapper()
-            mapper.SetResolveCoincidentTopology(1)
-            mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1, 0.5)
+            # Note: the resolve mode is a global VTK setting, the offset parameters are per mapper.
+            mapper.SetResolveCoincidentTopologyToPolygonOffset()
+            layer = obj_dim - 1
+            mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1.0 * layer, 0.5 * layer)
 
         return actor
 
@@ -1604,6 +1715,7 @@ class EMergeDisplay:
         clim: tuple[float, float] | None = None,
         opacity: float = None,
         voltype: Literal["cloud", "contour", "clip"] = "cloud",
+        vector_type: Literal["vector", "cloud"] = "vector",
         clim_crop_factor: float = 1.0,
         symmetrize: bool = False,
         quiver_scale: float = 1.0,
@@ -1627,6 +1739,9 @@ class EMergeDisplay:
             clipplane (bool, optional): If a 3D grid plot should be done including a clip plane. Defaults to false.
             clim_crop_factor (float, optional): A multiplier for the default clim limits. If this value is 0.5, the clim limits will be divided by half to zoom in on the color range.
             symmetrize (bool, optional): If the colorscale should be symmetrized. Defaults to False.
+            vector_type (Literal["vector","cloud"], optional): How 3D vector fields are drawn: 'vector' as arrows,
+                'cloud' as a volume where colour shows the direction and opacity the magnitude (see add_vector_cloud,
+                whose color_mapping and vivid options can be passed as keyword arguments). Defaults to 'vector'.
             resample_npts (int, optional): Grid points along the largest axis when resampling unstructured scalar data onto a regular grid. Defaults to 50.
             _fieldname (str | None, optional): A name for the field. Defaults to None.
 
@@ -1642,6 +1757,10 @@ class EMergeDisplay:
 
         if field.structure == DataStructure.TRISURF:
             if field._is_quiver:
+                if vector_type == "cloud":
+                    raise ValueError(
+                        "vector_type='cloud' needs volumetric data, surface fields can only use vector_type='vector'."
+                    )
                 self.add_quiver(
                     field.x,
                     field.y,
@@ -1672,6 +1791,39 @@ class EMergeDisplay:
                     **kwargs,
                 )
                 return
+        if field._is_quiver and vector_type == "cloud":
+            if field.structure == DataStructure.UNSTRUCTURED:
+                # The resampler interpolates the three components of a magnitude proxy
+                proxy = FieldPlotData(
+                    x=field.x, y=field.y, z=field.z,
+                    F=VectorFieldMagnitudeProxy(field.vx, field.vy, field.vz),
+                    structure=DataStructure.UNSTRUCTURED, name=field.name,
+                )
+                proxy = _resample_unstructured(proxy, resample_npts)
+                field = FieldPlotData(
+                    x=proxy.x, y=proxy.y, z=proxy.z,
+                    vx=proxy.F.x, vy=proxy.F.y, vz=proxy.F.z,
+                    structure=proxy.structure, name=field.name,
+                )
+            if field.structure != DataStructure.GRID3D:
+                raise ValueError(
+                    f"vector_type='cloud' needs volumetric data, got {field.structure}. Use vector_type='vector' instead."
+                )
+            self.add_vector_cloud(
+                field.x,
+                field.y,
+                field.z,
+                field.vx,
+                field.vy,
+                field.vz,
+                scale="log" if scale == "log" else "lin",
+                clim=clim,
+                clim_crop_factor=clim_crop_factor,
+                opacity=opacity,
+                _fieldname=_fieldname,
+                **kwargs,
+            )
+            return
         if field._is_quiver:
             self.add_quiver(
                 field.x,
@@ -2279,6 +2431,149 @@ class EMergeDisplay:
                 obj.actor.Modified()
 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update))  # type: ignore
+            self._animate_next = False
+        self._reset_cbar()
+
+    @plot_item
+    def add_vector_cloud(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        Z: np.ndarray,
+        vx: np.ndarray,
+        vy: np.ndarray,
+        vz: np.ndarray,
+        color_mapping: tuple[str, str, str] = ("r", "g", "b"),
+        vivid: bool = True,
+        color_gamma: float = 0.5,
+        scale: Literal["lin", "log"] = "lin",
+        clim: tuple[float, float] | None = None,
+        clim_crop_factor: float = 1.0,
+        log_range_db: float = 40.0,
+        opacity: np.ndarray | None = None,
+        _fieldname: str | None = None,
+    ):
+        """Adds a 3D volumetric cloud of a vector field where the colour shows the direction axis
+        and the opacity the magnitude.
+
+        Each colour channel is the absolute value of one direction component, so a direction and
+        its opposite share a colour: with the default mapping x is red, y green and z blue, and
+        in-between directions mix. Field rotation therefore shows as a colour shift, while sign
+        flips over the phase do not change the colour. Zero magnitude is transparent, magnitudes
+        at or above the upper limit are opaque. By default the upper limit is the 99th percentile
+        of |F|, so a few singular points (metal edges, ports) do not make the rest invisible.
+
+        Args:
+            X (np.ndarray): A 3D Grid of X-values
+            Y (np.ndarray): A 3D Grid of Y-values
+            Z (np.ndarray): A 3D Grid of Z-values
+            vx (np.ndarray): The X-component of the vector field (may be complex)
+            vy (np.ndarray): The Y-component of the vector field (may be complex)
+            vz (np.ndarray): The Z-component of the vector field (may be complex)
+            color_mapping (tuple[str, str, str], optional): The colour for the x, y and z axis, from
+                r, g, b (red, green, blue) and c, m, y (cyan, magenta, yellow), e.g. ("c", "m", "y").
+                The three colours must be independent: none can be a mix of the other two, so
+                ("r", "g", "y") is not allowed. Defaults to ("r", "g", "b").
+            vivid (bool, optional): Make every direction equally bright instead of dimming
+                in-between directions. Defaults to False.
+            color_gamma (float, optional): Balance between axis and in-between colours. 1 maps the
+                direction components directly, which makes axis colours dominate; lower values give
+                in-between colours more room. 0.8 spreads the hue almost evenly over the angle.
+                Defaults to 0.8.
+            scale (Literal["lin","log"], optional): Map |F| to opacity linearly or in dB. Defaults to 'lin'.
+            clim (tuple[float, float] | None, optional): The |F| range (min, max) mapped from transparent to opaque.
+                Defaults to None (automatic).
+            clim_crop_factor (float, optional): Multiplier on the automatic upper limit; below 1 makes weaker
+                fields more visible. Defaults to 1.0.
+            log_range_db (float, optional): Dynamic range shown with scale='log'. Defaults to 40 dB.
+            opacity (np.ndarray | None, optional): A 256 point opacity curve over the magnitude. Defaults to None.
+        """
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+
+        if opacity is None:
+            opacity_array = np.linspace(0, 256, 256)
+            if scale == "lin":
+                opacity_array = 256 * (opacity_array / 256) ** 2
+        else:
+            opacity_array = opacity
+
+        x_coords = X[0, :, 0]
+        y_coords = Y[:, 0, 0]
+        z_coords = Z[0, 0, :]
+
+        grid = pv.ImageData(
+            dimensions=(len(x_coords), len(y_coords), len(z_coords)),
+            spacing=(
+                x_coords[1] - x_coords[0],
+                y_coords[1] - y_coords[0],
+                z_coords[1] - z_coords[0],
+            ),
+            origin=(x_coords[0], y_coords[0], z_coords[0]),
+        )
+
+        # Same point ordering as add_cloud, components stacked as (N, 3)
+        field = np.column_stack(
+            [np.nan_to_num(np.asarray(v), nan=0.0).transpose(1, 0, 2).flatten(order="F") for v in (vx, vy, vz)]
+        )
+        # Full complex amplitude, so the opacity scale stays fixed during an animation
+        amplitude = np.linalg.norm(np.abs(field), axis=1)
+        if clim is None:
+            # 99th percentile instead of the maximum, so a few singular points (metal edges,
+            # ports) do not make the rest of the field nearly transparent
+            nonzero = amplitude[amplitude > 0]
+            vmax = float(np.percentile(nonzero, 99)) * clim_crop_factor if nonzero.size else 1.0
+            vmin = 0.0 if scale == "lin" else vmax * 10 ** (-log_range_db / 20)
+        else:
+            vmin, vmax = clim
+
+        if scale == "log":
+            vmin = max(vmin, vmax * 1e-12)
+            lmin, lmax = np.log10(vmin), np.log10(vmax)
+
+            def alpha_fn(m: np.ndarray) -> np.ndarray:
+                return (np.log10(np.maximum(m, 1e-300)) - lmin) / (lmax - lmin)
+        else:
+
+            def alpha_fn(m: np.ndarray) -> np.ndarray:
+                return (m - vmin) / (vmax - vmin)
+
+        # RGBA volumes use the alpha channel linearly, so the opacity curve is applied to alpha here
+        curve = np.clip(np.asarray(opacity_array, dtype=float), 0, 255)
+        curve_x = np.linspace(0, 255, len(curve))
+
+        def colorize(V: np.ndarray) -> np.ndarray:
+            rgba = _direction_rgba(V, alpha_fn, color_mapping, vivid, color_gamma)
+            rgba[:, 3] = np.round(np.interp(rgba[:, 3], curve_x, curve)).astype(np.uint8)
+            return rgba
+
+        grid[name] = colorize(np.real(field))
+
+        kwargs = self.set.theme.cloud_kwargs
+
+        actor = self._plot.add_volume(
+            grid,
+            scalars=name,
+            pickable=False,
+            **kwargs,
+        )
+        actor.prop.interpolation_type = "linear"
+
+        # Pyvista only sets the opacity unit distance of component 0, the others keep VTK's
+        # default of 1.0 world unit. RGBA volumes take opacity from component 3 (alpha), which
+        # would make them nearly transparent at mm scale.
+        unit_distance = actor.prop.GetScalarOpacityUnitDistance(0)
+        for component in range(1, 4):
+            actor.prop.SetScalarOpacityUnitDistance(component, unit_distance)
+
+        if self._animate_next:
+
+            def on_update(obj: _AnimObject, phi: complex):
+                obj.grid[name] = colorize(np.real(obj.field * phi))
+                obj.actor.GetMapper().SetInputData(obj.grid)
+                obj.actor.GetMapper().Modified()
+                obj.actor.Modified()
+
+            self._objs.append(_AnimObject(field, None, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
         self._reset_cbar()
 

@@ -746,6 +746,85 @@ class _EMV3(EMergeTheme):
         )
 
 
+class _Dither(EMergeTheme):
+    """A 1-bit theme that renders all geometry as black and white dot patterns."""
+
+    def define(self):
+        self.backgroung_grad_1 = "#FFFFFF"
+        self.backgroung_grad_2 = "#FFFFFF"
+        self.grid_color = "#000000"
+        self.text_color = "#000000"
+        self.label_color = "#FFFFFF"
+        self.geo_edge_color = "#000000"
+
+        # Lights stay on so faces get different dot densities
+        self.render_shadows = True
+        self.render_pbr = False
+        self.render_ambient = 0.15
+        self.render_diffuse = 0.9
+        self.render_specular = 0.1
+
+        self.render_dither = True
+        self.dither_cell = 4
+        self.dither_levels = 0
+
+        # Black outlines keep touching objects with similar dot densities apart
+        self.render_silhouette = True
+        self.geo_edge_width = 5.0
+
+        # Dot density follows brightness, so colormaps must be monotonic in brightness
+        self.colormaps = {
+            "amplitude": (("#FFFFFF", "#000000"), (0.0, 1.0)),
+            "wave": (("#000000", "#FFFFFF"), (0.0, 1.0)),
+        }
+
+        self.line_color_cycle = ["#000000"]
+
+        # Three grey levels for the materials
+        self.color_name_map = {
+            "EMERGE-PEC": "#909090",
+            "EMERGE-COPPER": "#909090",
+            "EMERGE-DIEL": "#E0E0E0",
+            "EMERGE-SELECT": "#808080",
+            "EMERGE-TEXT": "#000000",
+        }
+
+        # Overlapping see-through dot patterns are hard to read, so field surfaces are opaque
+        self.opacity_codes = {"EMERGE-SURF": 1.0}
+
+
+class _Annalen(_Dither):
+    """A pre-computer era print theme, after the Annalen der Physik plates of the early 1900s.
+
+    Pure black and white: everything is dithered, anti-aliasing is off and labels use a serif font.
+    """
+
+    def define(self):
+        super().define()
+
+        self.aa_active = False
+        self.text_font = "times"
+        self.text_size = 22
+
+        # A plain plate: no coloured axis helpers, just black ink
+        self.axis_color = "#000000"
+        self.axis_x_color = "#000000"
+        self.axis_y_color = "#000000"
+        self.axis_z_color = "#000000"
+        self.grid_color = "#000000"
+        self.grid_width = 0.5
+        self.draw_pvgrid = False
+
+        # Coarse halftone with a few distinct tones, like an engraved plate
+        self.dither_cell = 3
+        self.dither_levels = 4
+
+        self.geo_mesh_width = 4
+        self.geo_edge_width = 4
+        # Matte ink: specular highlights become hard-edged blobs when quantized
+        self.render_specular = 0.0
+
+
 VaporWave = _VaporWave()
 Vintage = _Vintage()
 Tron = _Tron()
@@ -755,3 +834,5 @@ DocumentFancy = _DocumentFancy()
 GigawaveStudio = _GigawaveStudio()
 LFSS = _LFSS()
 EMV3 = _EMV3()
+Dither = _Dither()
+Annalen = _Annalen()
