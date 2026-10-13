@@ -233,7 +233,7 @@ def _resample_unstructured(field: FieldPlotData, npts: int = 50) -> FieldPlotDat
         X, Y, Z = (A.squeeze() for A in (X, Y, Z))
         comps = [C.squeeze() for C in comps]
 
-    Fgrid = VectorFieldMagnitudeProxy(*comps) if is_proxy else comps[0]
+    Fgrid = type(field.F)(*comps) if is_proxy else comps[0]
 
     return FieldPlotData(x=X, y=Y, z=Z, F=Fgrid, structure=structure, name=field.name)
 

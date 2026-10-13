@@ -76,7 +76,7 @@ class VectorFieldMagnitudeProxy:
         Returns:
             VectorFieldMagnitudeProxy: A new instance with copied component arrays.
         """
-        return VectorFieldMagnitudeProxy(self.x.copy(), self.y.copy(), self.z.copy())
+        return type(self)(self.x.copy(), self.y.copy(), self.z.copy())
 
     def __array__(self, dtype=None):
         """Converts the proxy to a plain NumPy array via its scalar magnitude.
@@ -133,13 +133,13 @@ class VectorFieldMagnitudeProxy:
                     VectorFieldMagnitudeProxy: A new proxy holding the
                         per-component results.
                 """
-                return VectorFieldMagnitudeProxy(
+                return type(self)(
                     getattr(self.x, name)(*args, **kwargs),
                     getattr(self.y, name)(*args, **kwargs),
                     getattr(self.z, name)(*args, **kwargs),
                 )
             return forwarded
-        return VectorFieldMagnitudeProxy(attr_x, getattr(self.y, name), getattr(self.z, name))
+        return type(self)(attr_x, getattr(self.y, name), getattr(self.z, name))
 
     def __array_function__(self, func, types, args, kwargs):
         """Dispatches NumPy free functions (e.g. np.nan_to_num) per component.
@@ -164,7 +164,7 @@ class VectorFieldMagnitudeProxy:
         y_args = [unwrap(a, "y") for a in args]
         z_args = [unwrap(a, "z") for a in args]
 
-        return VectorFieldMagnitudeProxy(
+        return type(self)(
             func(*x_args, **kwargs),
             func(*y_args, **kwargs),
             func(*z_args, **kwargs),
@@ -221,7 +221,38 @@ class VectorFieldMagnitudeProxy:
             np.ndarray: The real-valued scalar magnitude field.
         """
         return self * 1
-    
+
+
+class VectorFieldEnergyProxy(VectorFieldMagnitudeProxy):
+    """A complex 3-component vector field that reduces to its squared real magnitude.
+
+    Identical to VectorFieldMagnitudeProxy except that the reduction is
+    |Re(F·e^(jωt))|² instead of |Re(F·e^(jωt))|. Any per-point weight
+    (e.g. ε0·Re(εr)/2) must be folded into the components as its square
+    root, so the proxy yields instantaneous energy densities when animated.
+    """
+
+    @property
+    def scalar(self) -> np.ndarray:
+        """Computes the real-valued squared magnitude of the field.
+
+        Returns:
+            np.ndarray: Re(x)^2 + Re(y)^2 + Re(z)^2 at each point.
+        """
+        return self.x.real**2 + self.y.real**2 + self.z.real**2
+
+    def __mul__(self, other):
+        """Computes the squared magnitude of the field scaled by a factor.
+
+        Args:
+            other (_type_): Scalar or array multiplier, e.g. a complex
+                phase factor.
+
+        Returns:
+            np.ndarray: The real-valued squared magnitude of the scaled field.
+        """
+        return (self.x*other).real**2 + (self.y*other).real**2 + (self.z*other).real**2
+
 
 @dataclass
 class FarFieldComponent(Saveable):
@@ -771,7 +802,7 @@ class EHField(Saveable):
     @property
     def EH(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the electric and magnetic field as a tuple of numpy arrays"""
-        return self.E, self
+        return self.E, self.H
 
     @property
     def E(self) -> np.ndarray:
@@ -934,6 +965,46 @@ class EHField(Saveable):
             - 1 / 2 * w * MU0 * self.ur.imag * self.normH**2
         )
         return Qv
+
+    @property
+    def We(self) -> np.ndarray:
+        """The time-averaged stored electric energy density [J/m³]
+
+        <w_e> = ε0/4 · Re(εr) · |E|²
+        """
+        return 0.25 * EPS0 * np.real(self.er) * self.normE**2
+
+    @property
+    def Wm(self) -> np.ndarray:
+        """The time-averaged stored magnetic energy density [J/m³]
+
+        <w_m> = μ0/4 · Re(μr) · |H|²
+        """
+        return 0.25 * MU0 * np.real(self.ur) * self.normH**2
+
+    @property
+    def We_t(self) -> VectorFieldEnergyProxy:
+        """The instantaneous stored electric energy density [J/m³]
+
+        w_e(t) = ε0/2 · Re(εr) · |Re(E·e^(jωt))|²
+
+        Returned as a proxy so it can be animated: multiplying by the phase
+        factor e^(jωt) yields the real energy density at that instant.
+        """
+        c = np.sqrt(0.5 * EPS0 * np.real(self.er))
+        return VectorFieldEnergyProxy(c * self.Ex, c * self.Ey, c * self.Ez)
+
+    @property
+    def Wm_t(self) -> VectorFieldEnergyProxy:
+        """The instantaneous stored magnetic energy density [J/m³]
+
+        w_m(t) = μ0/2 · Re(μr) · |Re(H·e^(jωt))|²
+
+        Returned as a proxy so it can be animated: multiplying by the phase
+        factor e^(jωt) yields the real energy density at that instant.
+        """
+        c = np.sqrt(0.5 * MU0 * np.real(self.ur))
+        return VectorFieldEnergyProxy(c * self.Hx, c * self.Hy, c * self.Hz)
 
     def _get_quantity(self, field: str, metric: str) -> np.ndarray:
         field_arry = getattr(self, field)
