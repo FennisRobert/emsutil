@@ -1137,11 +1137,6 @@ class EMergeDisplay:
         # Sanitize and flatten
         Vf = np.nan_to_num(V.flatten())
 
-        # Extract min and max
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
-
         default_cmap = self.set.theme.default_amplitude_cmap
 
         if value_scale == "log":
@@ -1151,10 +1146,24 @@ class EMergeDisplay:
         else:
             T = lambda x: x
 
+        # Extract min and max of the raw data, scaled by the crop factor
+        Vr = Vf.real
         if symmetrize:
-            level = np.max(np.abs(Vf)) * clim_crop_factor
+            level = np.max(np.abs(Vr)) * clim_crop_factor
             vmin, vmax = (-level, level)
             default_cmap = self.set.theme.default_wave_cmap
+        else:
+            vmin, vmax = nanminmax(Vr)
+            vmin = vmin * clim_crop_factor
+            vmax = vmax * clim_crop_factor
+
+        # The plotted data is T(V), so the limits must be expressed in T-space as well
+        if value_scale == "log":
+            # log|V| is defined on the magnitude; the crop factor only moves the top of the range
+            Va = np.abs(Vr)
+            vmin, vmax = T(np.min(Va)), T(np.max(Va) * clim_crop_factor)
+        elif value_scale == "symlog":
+            vmin, vmax = T(vmin), T(vmax)
 
         if clim is None:
             if self._cbar_lim is not None:
@@ -2386,8 +2395,8 @@ class EMergeDisplay:
                     1 - np.cos(np.linspace(-np.pi / 2, np.pi / 2, 256))
                 )**0.85
             else:
-                opacity_array = np.linspace(0, 256, 256)
-                opacity_array = 256 * (opacity_array/256)**2
+                # Peak at 255: pyvista stores the curve as uint8, so 256 would wrap to fully transparent
+                opacity_array = 255 * np.linspace(0, 1, 256)**2
         else:
             opacity_array = opacity
 
@@ -2407,7 +2416,9 @@ class EMergeDisplay:
         
         V = np.nan_to_num(V, nan=0.0)
         field = V.transpose(1, 0, 2).flatten(order="F")
-        grid[name] = T(np.real(field))
+        # Clip to clim: values outside it already render with the end colour, but VTK samples the
+        # transfer function over the full data range, which can exceed the GPU's maximum texture size
+        grid[name] = np.clip(T(np.real(field)), *clim)
 
         self._cbar_defaults(title=name)
         kwargs = self.set.theme.cloud_kwargs
@@ -2429,7 +2440,7 @@ class EMergeDisplay:
 
             def on_update(obj: _AnimObject, phi: complex):
                 field_anim = obj.T(np.real(obj.field * phi))
-                obj.grid[name] = field_anim
+                obj.grid[name] = np.clip(field_anim, *clim)
                 obj.actor.GetMapper().SetInputData(obj.grid)
                 obj.actor.GetMapper().Modified()
                 obj.actor.Modified()
@@ -2495,9 +2506,9 @@ class EMergeDisplay:
         name = self._get_fieldname() if _fieldname is None else _fieldname
 
         if opacity is None:
-            opacity_array = np.linspace(0, 256, 256)
+            opacity_array = np.linspace(0, 255, 256)
             if scale == "lin":
-                opacity_array = 256 * (opacity_array / 256) ** 2
+                opacity_array = 255 * (opacity_array / 255) ** 2
         else:
             opacity_array = opacity
 
