@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from functools import wraps
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
 import numpy as np
 import pyvista as pv
@@ -546,10 +546,14 @@ class _PlotItem:
             label.GetPoints().Modified()
 
 
-def plot_item(method: Callable) -> Callable:
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def plot_item(method: _F) -> _F:
     """Decorator for plot methods: everything the call adds becomes one _PlotItem.
 
     Calls nested inside another decorated call join the outer item.
+    Typed to return the decorated method's own signature, so editors keep its argument hints.
     """
 
     @wraps(method)
@@ -557,7 +561,7 @@ def plot_item(method: Callable) -> Callable:
         with self._item():
             return method(self, *args, **kwargs)
 
-    return wrapper
+    return cast(_F, wrapper)
 
 
 class EMergeDisplay:
@@ -1148,7 +1152,7 @@ class EMergeDisplay:
             T = lambda x: x
 
         if symmetrize:
-            level = np.max(np.abs(Vf))
+            level = np.max(np.abs(Vf)) * clim_crop_factor
             vmin, vmax = (-level, level)
             default_cmap = self.set.theme.default_wave_cmap
 
