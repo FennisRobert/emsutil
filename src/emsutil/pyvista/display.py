@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import wraps
 from importlib.resources import files
 from pathlib import Path
@@ -476,6 +477,17 @@ def _label_points(actor: vtkActor2D) -> vtkPolyData | None:
     return None
 
 
+@dataclass
+class _CbarSpec:
+    """Colorbar settings for the next plot call, set through EMergeDisplay.cbar."""
+
+    show: bool = True
+    title: str | None = None
+    n_labels: int = 5
+    interactive: bool = False
+    clim: tuple[float, float] | None = None
+
+
 class _PlotItem:
     """All actors created by one plot call, such as a geometry with its edge lines and labels.
 
@@ -598,8 +610,7 @@ class EMergeDisplay:
         self._obj_cycler: list[_PlotItem] = []
 
         self._bounds: tuple[float, float, float, float, float, float] | None = None
-        self._cbar_args: dict = {}
-        self._cbar_lim: tuple[float, float] | None = None
+        self._cbar: _CbarSpec = _CbarSpec()
         self.camera_position = (1, -1, 1)  # +X, +Z, -Y
 
         self.__post_init__(*args, **kwargs)
@@ -733,60 +744,50 @@ class EMergeDisplay:
         """Configure the colorbar settings for the next plot call to be made.
 
         Args:
-            name (str): The name of the field quantity (shared between multiple plots of the same name)
+            name (str | None): The colorbar title (shared between multiple plots of the same name).
+                None or False hides the colorbar of the next plot.
             n_labels (int, optional): The number of color-bar value labels. Defaults to 5.
             interactive (bool, optional): If the colorbar should be set to interactive mode. Defaults to False.
-            clim (tuple[float, float] | None, optional): The color-limits (manual overwrite). Defaults to None.
+            clim (tuple[float, float] | None, optional): The color-limits (manual overwrite), also applied
+                when the colorbar is hidden. Defaults to None.
 
         Returns:
             EMergeDisplay: This same object instance
         """
-        if name in (None, False):
-            self._cbar_args = dict(show=False)
-            return self
-        
-        self._cbar_args = dict(
-            title=name,
+        show = name not in (None, False)
+        self._cbar = _CbarSpec(
+            show=show,
+            title=str(name) if show and name is not True else None,
             n_labels=n_labels,
             interactive=interactive,
-            title_font_size=26,
-            label_font_size=25,
-            unconstrained_font_size=True,
+            clim=clim,
         )
-        self._cbar_lim = clim
         return self
 
-    def _cbar_defaults(self, **kwargs):
-        """overwrite Defaults kwargs for _cbar_args."""
-        defaults = dict(
+    def _add_scalar_bar(self, actor: pv.Actor | pv.Volume, title: str) -> None:
+        """Adds the colorbar for actor according to the cbar() settings.
+
+        Plot calls pass show_scalar_bar=False to pyvista and call this afterwards, so the font size
+        settings work for every plot type. title is used when cbar() set none.
+        """
+        spec = self._cbar
+        if not spec.show:
+            return
+        self._plot.add_scalar_bar(
+            title=spec.title if spec.title is not None else title,
+            mapper=actor.mapper,
+            n_labels=spec.n_labels,
+            interactive=spec.interactive,
             title_font_size=26,
             label_font_size=24,
             color=self.set.theme.text_color,
             unconstrained_font_size=True,
         )
-        defaults.update(kwargs)
-
-        self._cbar_args = self._append_with_defaults(self._cbar_args, defaults)
 
     def _wrap_plot(self, *args, **kwargs) -> pv.Actor:
-        """Performs plot operations to handle Pyvistas behavior better"""
-
-        # Scalar bars are handled separately in order to make font size changes work
-        if "scalar_bar_args" in kwargs:
-            sbargs = kwargs.pop("scalar_bar_args")
-        else:
-            sbargs = None
-            
-        # Make the plot call without scalar bar
+        """add_mesh without pyvista's own colorbar; plot calls add theirs through _add_scalar_bar."""
         kwargs["show_scalar_bar"] = False
-        actor = self._plot.add_mesh(*args, **kwargs)
-
-        # Add the scalar bar separately.
-        if sbargs is not None and sbargs.get('show', True):
-            if 'show' in sbargs:
-                sbargs.pop('show')
-            self._plot.add_scalar_bar(**sbargs)
-        return actor
+        return self._plot.add_mesh(*args, **kwargs)
 
     @contextmanager
     def _item(self) -> Iterator[_PlotItem]:
@@ -805,6 +806,8 @@ class EMergeDisplay:
             yield item
         finally:
             self._current_item = None
+            # The cbar() settings apply to one (outermost) plot call
+            self._cbar = _CbarSpec()
             item.collect(
                 actor
                 for actor in self._plot.renderer.actors.values()
@@ -820,10 +823,6 @@ class EMergeDisplay:
     @property
     def _selectable_items(self) -> list[_PlotItem]:
         return [item for item in self._items if item.name is not None]
-
-    def _reset_cbar(self) -> None:
-        self._cbar_args: dict = {}
-        self._cbar_lim: tuple[float, float] | None = None
 
     def _wire_close_events(self):
         self._closed = False
@@ -1166,8 +1165,8 @@ class EMergeDisplay:
             vmin, vmax = T(vmin), T(vmax)
 
         if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
+            if self._cbar.clim is not None:
+                clim = self._cbar.clim
                 vmin, vmax = clim
             else:
                 clim = (vmin, vmax)
@@ -1276,7 +1275,7 @@ class EMergeDisplay:
         self._items = []
         self._current_item = None
         self._bwdrawing = False
-        self._reset_cbar()
+        self._cbar = _CbarSpec()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
         self._cycle_pos: int = 0
@@ -1762,8 +1761,8 @@ class EMergeDisplay:
             pv.DataSet: _description_
         """
 
-        if "title" not in self._cbar_args:
-            self._cbar_args["title"] = field.name
+        if self._cbar.title is None:
+            self._cbar.title = field.name
 
         if self._do_animate:
             smooth_shading = False
@@ -1986,12 +1985,9 @@ class EMergeDisplay:
         )
 
         # Overwrite the color bar Title if no title exists
-        self._cbar_defaults(title=name)
-
         # Generate the plot
-        actor = self._wrap_plot(
-            grid_no_nan, scalars=name, scalar_bar_args=self._cbar_args, **kwargs
-        )
+        actor = self._wrap_plot(grid_no_nan, scalars=name, **kwargs)
+        self._add_scalar_bar(actor, name)
 
         # Animation settings
         if self._animate_next:
@@ -2007,7 +2003,6 @@ class EMergeDisplay:
                 _AnimObject(field_flat, T, grid, grid_no_nan, actor, on_update)
             )
             self._animate_next = False
-        self._reset_cbar()
         return grid_no_nan
 
     @plot_item
@@ -2072,14 +2067,13 @@ class EMergeDisplay:
             )
         )
 
-        self._cbar_defaults(title=name)
         actor = self._wrap_plot(
             grid,
             scalars=name,
-            scalar_bar_args=self._cbar_args,
             backface_culling=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
         if self._animate_next:
 
@@ -2090,7 +2084,6 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field_flat, T, grid, grid, actor, on_update))
             self._animate_next = False
-        self._reset_cbar()
 
     def add_title(self, title: str, color: str = "EMERGE-TEXT") -> None:
         """Adds a title to the plot
@@ -2202,11 +2195,8 @@ class EMergeDisplay:
         # Turn Scalar bars off if a uniform color was supplied. Unique to Add Quiver.
         if color is not None:
             kwargs["color"] = self.set.theme.parse_color_name(color)
-            self._cbar_args['show'] = False
 
         cmap = self._parse_cmap_name(cmap)
-
-        self._cbar_defaults(title=_fieldname)
 
         arrow_obj = pv.Arrow(**self.set.theme.quiver_kwargs)
         grid = pv.StructuredGrid(x, y, z)
@@ -2218,11 +2208,11 @@ class EMergeDisplay:
             arrows,
             clim=None,
             cmap=cmap,
-            scalar_bar_args=self._cbar_args,
             **kwargs,
         )
+        if color is None:
+            self._add_scalar_bar(actor, _fieldname)
 
-        self._reset_cbar()
 
         if self._animate_next:
 
@@ -2282,17 +2272,17 @@ class EMergeDisplay:
 
         kwargs = self._append_with_defaults(dict(), self.set.theme.surf_kwargs)
 
-        self._plot.add_mesh_clip_plane(
+        actor = self._plot.add_mesh_clip_plane(
             grid,
             opacity=opacity,
             cmap=cmap,
             clim=clim,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
+            show_scalar_bar=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
-        self._reset_cbar()
 
     @plot_item
     def add_contour(
@@ -2329,8 +2319,6 @@ class EMergeDisplay:
         field = V.flatten(order="F")
         grid[name] = T(np.real(field))
 
-        self._cbar_defaults(title=name)
-
         levels = list(np.linspace(clim[0], clim[1], Nlevels))
         contour = grid.contour(isosurfaces=levels)
 
@@ -2342,9 +2330,9 @@ class EMergeDisplay:
             cmap=cmap,
             clim=clim,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
         if self._animate_next:
 
@@ -2356,7 +2344,6 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
-        self._reset_cbar()
 
     @plot_item
     def add_cloud(
@@ -2420,7 +2407,6 @@ class EMergeDisplay:
         # transfer function over the full data range, which can exceed the GPU's maximum texture size
         grid[name] = np.clip(T(np.real(field)), *clim)
 
-        self._cbar_defaults(title=name)
         kwargs = self.set.theme.cloud_kwargs
 
         # Add to the plot
@@ -2431,9 +2417,10 @@ class EMergeDisplay:
             clim=clim,
             cmap=cmap,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
+            show_scalar_bar=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
         actor.prop.interpolation_type = "linear"
 
         if self._animate_next:
@@ -2447,7 +2434,6 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
-        self._reset_cbar()
 
     @plot_item
     def add_vector_cloud(
@@ -2590,7 +2576,6 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field, None, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
-        self._reset_cbar()
 
     @plot_item
     def add_streamline(
@@ -2673,18 +2658,16 @@ class EMergeDisplay:
             source_center=source_center,
             source_radius=source_radius,
         )
-        self._cbar_defaults(title=name)
         kwargs = self.set.theme.streamline_kwarg
 
         actor = self._wrap_plot(
             sl,
             cmap=cmap,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
-        self._reset_cbar()
 
     def _add_aux_items(self) -> None:
         saved_camera = {
