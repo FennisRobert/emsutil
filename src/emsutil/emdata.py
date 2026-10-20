@@ -198,6 +198,37 @@ class VectorFieldMagnitudeProxy:
         """
         return ((self.x*other).real**2 + (self.y*other).real**2 + (self.z*other).real**2) ** 0.5
 
+    def __add__(self, other):
+        """Adds a scalar or array to the reduced field.
+
+        The proxy is first reduced to its real scalar field (see scalar), i.e.
+        the snapshot at phase 0, so the result is a plain array and is no
+        longer animatable: multiplying it by a phase factor scales the values
+        instead of advancing the field in time. Subclasses only need to
+        override scalar.
+
+        Args:
+            other (_type_): Scalar or array added to the reduced field.
+
+        Returns:
+            np.ndarray: scalar + other.
+        """
+        return self.scalar + other
+
+    def __radd__(self, other):
+        """Adds the reduced field to a scalar or array (reflected).
+
+        Makes sum() over proxies work, which starts from 0 + proxy.
+        Same snapshot caveat as __add__.
+
+        Args:
+            other (_type_): Scalar or array the reduced field is added to.
+
+        Returns:
+            np.ndarray: other + scalar.
+        """
+        return other + self.scalar
+
     def __rmul__(self, other):
         """Computes the magnitude of the field scaled by a factor (reflected).
 
