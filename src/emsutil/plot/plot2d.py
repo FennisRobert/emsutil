@@ -16,7 +16,16 @@ EMERGE_COLORS = [
     "#e6308a",
     "#e89a08",
 ]
-
+EMERGE_COLORS = [
+    "#3b5163",  # slate: drafting ink, softened
+    "#2f6bd0",  # prussian blue
+    "#e8492a",  # vermilion (Smith-chart red)
+    "#13a37e",  # P1 phosphor teal
+    "#d68c00",  # amber CRT
+    "#c03a86",  # recorder-pen magenta
+    "#19a4c9",  # scope channel-2 cyan
+    "#8a9a22",  # olive drab
+]
 EMERGE_CYCLER = cycler(color=EMERGE_COLORS)
 plt.rc("axes", prop_cycle=EMERGE_CYCLER)
 
