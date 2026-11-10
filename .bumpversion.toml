@@ -22,4 +22,7 @@ post_commit_hooks = []
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+# Only the project version: a bare "{current_version}" search also bumps dependency pins that happen to match
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
 
