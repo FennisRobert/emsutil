@@ -29,103 +29,81 @@ def num_args(func):
     return sum(
         1
         for p in sig.parameters.values()
-        if p.default is inspect._empty
-        and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        if p.default is inspect._empty and p.kind in (
+            p.POSITIONAL_ONLY,
+            p.POSITIONAL_OR_KEYWORD,
+            p.KEYWORD_ONLY
+        )
     )
-
-
+    
 def _to_mat(value: float | complex | int | np.ndarray) -> np.ndarray:
     if np.isscalar(value):
-        return np.eye(3) * value
-    if value.shape in ((3,), (3, 1), (1, 3)):
+        return np.eye(3)*value
+    if value.shape in ((3,), (3,1), (1,3)):
         return np.diag(np.ravel(value))
-    if value.shape == (3, 3):
+    if value.shape == (3,3):
         return value
     else:
-        return ValueError(
-            f"Trying to parse {value} as a material property tensor but it cant be identified as scalar, vector or matrix"
-        )
-
+        return ValueError(f'Trying to parse {value} as a material property tensor but it cant be identified as scalar, vector or matrix')
 
 class MatProperty(Saveable):
     _freq_dependent: bool = False
     _coord_dependent: bool = False
-    _pickle_exclude = {"_func", "_fmax"}
-    skip_fields = ("_func", "_fmax")
+    _pickle_exclude = {"_func","_fmax"}
+    skip_fields = ("_func","_fmax")
     """The MatProperty class is an interface for EMerge to deal with frequency and coordinate dependent material properties
     """
-
+    
     def __init__(self, value: float | complex | int | np.ndarray):
         self._value: np.ndarray = _to_mat(value)
-
-        self._apply_to: np.ndarray = np.array([], dtype=np.int64)
+        
         self._x: np.ndarray = np.array([], dtype=np.float64)
         self._y: np.ndarray = np.array([], dtype=np.float64)
         self._z: np.ndarray = np.array([], dtype=np.float64)
-
+        
         self._fmax = lambda f: value
-
-    def initialize(
-        self, x: np.ndarray, y: np.ndarray, z: np.ndarray, ids: np.ndarray
-    ) -> None:
-        self._apply_to = np.concatenate([self._apply_to, ids])
-        self._x = np.concatenate([self._x, x])
-        self._y = np.concatenate([self._y, y])
-        self._z = np.concatenate([self._z, z])
-
-    def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
+        
+    def __call__(self, f: float, data: np.ndarray, coords: np.ndarray, ids: np.ndarray) -> np.ndarray:
         # Separate tensors from scalars
-        data[:, :, self._apply_to] = np.repeat(
-            self._value[:, :, np.newaxis], self._apply_to.shape[0], axis=2
-        )
+        data[:,:,ids] = np.repeat(self._value[:,:,np.newaxis], ids.shape[0], axis=2)
         return data
 
     @property
     def value(self) -> float:
-        return self._value[0, 0]
-
+        return self._value[0,0]
+    
     def scalar(self, f: float):
-        return self._value[0, 0]
-
-    def reset(self) -> None:
-        self._apply_to: np.ndarray = np.array([], dtype=np.int64)
-        self._x: np.ndarray = np.array([], dtype=np.float64)
-        self._y: np.ndarray = np.array([], dtype=np.float64)
-        self._z: np.ndarray = np.array([], dtype=np.float64)
-
+        return self._value[0,0]
+    
     def __getstate__(self):
         state = self.__dict__.copy()
         for k in self._pickle_exclude:
             state.pop(k, None)
-
+        
         return state
-
+    
     def __setstate__(self, state):
         self.__dict__.update(state)
         for k in self._pickle_exclude:
             setattr(self, k, None)
-
-
+    
 class FreqDependent(MatProperty, Saveable):
     _freq_dependent: bool = True
     _coord_dependent: bool = False
-    skip_fields = ("_func", "_fmax")
-
-    def __init__(
-        self,
-        scalar: Callable | None = None,
-        vector: Callable | None = None,
-        matrix: Callable | None = None,
-    ):
+    skip_fields = ("_func","_fmax")
+    def __init__(self, 
+                 scalar: Callable | None = None,
+                 vector: Callable | None = None,
+                 matrix: Callable | None = None):
         """Creates a frequency dependent property object.
-
+        
         If the property is defined as a scalar value, use the "scalar" argument
-        If the property is a diagonal rank-2 tensor, use the "vector" argument
+        If the property is a diagonal rank-2 tensor, use the "vector" argument                   
         If the property is a full rank-2 tensor, use the "matrix" argument
 
-        The max_value property must be set to tell EMerge how height this value can get
+        The max_value property must be set to tell EMerge how height this value can get 
         as it will be used to define the discretization of the mesh.
-
+        
         Args:
             scalar (Callable | None, optional): The scalar value function returning a float/complex. Defaults to None.
             vector (Callable | None, optional): The diagonal rank-2 tensor function returning a (3,) array. Defaults to None.
@@ -133,150 +111,114 @@ class FreqDependent(MatProperty, Saveable):
 
         """
         if scalar is not None:
-
             def _func(f: float) -> np.ndarray:
-                return np.eye(3) * scalar(f)
-
+                return np.eye(3)*scalar(f)
         if vector is not None:
-
             def _func(f: float) -> np.ndarray:
                 return np.diag(np.ravel(vector(f)))
-
+        
         if matrix is not None:
             _func = matrix
 
         self._func: Callable = _func
-
-        self._apply_to: np.ndarray = np.array([], dtype=np.int64)
-        self._x: np.ndarray = np.array([], dtype=np.float64)
-        self._y: np.ndarray = np.array([], dtype=np.float64)
-        self._z: np.ndarray = np.array([], dtype=np.float64)
-
+        
         self._fmax: Callable = lambda f: np.max(np.ravel(self._func(f)))
 
-    def initialize(
-        self, x: np.ndarray, y: np.ndarray, z: np.ndarray, ids: np.ndarray
-    ) -> None:
-        self._apply_to = np.concatenate([self._apply_to, ids])
-
-    def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
+    def __call__(self, f: float, data: np.ndarray, coords: np.ndarray, ids: np.ndarray) -> np.ndarray:
         # Separate (3,3) tensors and scalars
-        data[:, :, self._apply_to] = np.repeat(
-            self._func(f)[:, :, np.newaxis], self._apply_to.shape[0], axis=2
-        )
+        data[:,:,ids] = np.repeat(self._func(f)[:,:,np.newaxis], ids.shape[0], axis=2)
         return data
-
+    
     @property
     def value(self) -> float:
-        raise ValueError(
-            "Frequency dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency."
-        )
-
+        raise ValueError('Frequency dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency.')
+    
     def scalar(self, f: float):
-        return self._func(f)[0, 0]
-
-
-class CoordDependent(MatProperty, Saveable):
+        return self._func(f)[0,0]
+    
+class CoordDependent(MatProperty,Saveable):
     _freq_dependent: bool = False
     _coord_dependent: bool = True
-    skip_fields = ("_func", "_fmax")
-
-    def __init__(
-        self,
-        max_value: float,
-        scalar: Callable | None = None,
-        vector: Callable | None = None,
-        matrix: Callable | None = None,
-    ):
+    skip_fields = ("_func","_fmax")
+    def __init__(self, 
+                 max_value: float,
+                 scalar: Callable | None = None,
+                 vector: Callable | None = None,
+                 matrix: Callable | None = None,
+                 ):
         """Creates a coordinate dependent property object.
-
+        
         If the property is defined as a scalar value, use the "scalar" argument.
-
+        
         If the property is a diagonal rank-2 tensor, use the "vector" argument.
-
+        
         If the property is a full rank-2 tensor, use the "matrix" argument.
+        
 
-
-        The max_value property must be set to tell EMerge how height this value can get
+        The max_value property must be set to tell EMerge how height this value can get 
         as it will be used to define the discretization of the mesh.
-
+        
         Args:
             max_value (float): The heighest value of the material property
             scalar (Callable | None, optional): The scalar value function returning a float/complex. Defaults to None.
             vector (Callable | None, optional): The diagonal rank-2 tensor function returning a (3,) array. Defaults to None.
             matrix (Callable | None, optional): The rank-2 tensor function returning a (3,3) array. Defaults to None.
-
+            
         """
-
+        
         if scalar is not None:
-
             def _func(x, y, z) -> np.ndarray:
-                return np.eye(3)[:, :, None] * scalar(x, y, z)[None, None, :]
-
+                return np.eye(3)[:, :, None] * scalar(x,y,z)[None, None, :]
+        
         if vector is not None:
-
             def _func(x, y, z) -> np.ndarray:
                 N = x.shape[0]
-                out = np.zeros((3, 3, N), dtype=vector(0, 0, 0).dtype)
+                out = np.zeros((3, 3, N), dtype=vector(0,0,0).dtype)
                 idx = np.arange(3)
-                out[idx, idx, :] = vector(x, y, z)
+                out[idx, idx, :] = vector(x,y,z)
                 return out
-
         if matrix is not None:
             _func = matrix
 
         self._func: Callable = _func
-        self._apply_to: np.ndarray = np.array([], dtype=np.int64)
-        self._x: np.ndarray = np.array([], dtype=np.float64)
-        self._y: np.ndarray = np.array([], dtype=np.float64)
-        self._z: np.ndarray = np.array([], dtype=np.float64)
-
+        
         self._values: np.ndarray = None
         self._fmax: Callable = lambda f: max_value
-
-    def initialize(
-        self, x: np.ndarray, y: np.ndarray, z: np.ndarray, ids: np.ndarray
-    ) -> None:
-        self._apply_to = np.concatenate([self._apply_to, ids])
-        self._x = np.concatenate([self._x, x])
-        self._y = np.concatenate([self._y, y])
-        self._z = np.concatenate([self._z, z])
-
-    def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
-        data[:, :, self._apply_to] = self._func(self._x, self._y, self._z)
+   
+    def __call__(self, f: float, data: np.ndarray, coords: np.ndarray, ids: np.ndarray) -> np.ndarray:
+        xs = coords[0,ids]
+        ys = coords[1,ids]
+        zs = coords[2,ids]
+        data[:,:,ids] = self._func(xs, ys, zs)
         return data
 
     @property
     def value(self) -> float:
-        return self._func(0, 0, 0)[0, 0]
-
+        return self._func(0,0,0)[0,0]
+    
     def scalar(self, f: float):
-        return self._func(0, 0, 0)[0, 0]
-
-
+        return self._func(0,0,0)[0,0]
+    
 class FreqCoordDependent(MatProperty, Saveable):
     _freq_dependent: bool = True
     _coord_dependent: bool = True
-    skip_fields = ("_func", "_fmax")
-
-    def __init__(
-        self,
-        max_value: float,
-        scalar: Callable | None = None,
-        vector: Callable | None = None,
-        matrix: Callable | None = None,
-    ):
+    skip_fields = ("_func","_fmax")
+    def __init__(self, 
+                 max_value: float,
+                 scalar: Callable | None = None,
+                 vector: Callable | None = None,
+                 matrix: Callable | None = None):
         """Creates a frequency and coordinate dependent property object.
-
+        
         If the property is defined as a scalar value, use the "scalar" argument.
-
+        
         If the property is a diagonal rank-2 tensor, use the "vector" argument.
-
+        
         If the property is a full rank-2 tensor, use the "matrix" argument.
 
-        The max_value property must be set to tell EMerge how height this value can get
+        The max_value property must be set to tell EMerge how height this value can get 
         as it will be used to define the discretization of the mesh.
-
+        
         Args:
             max_value (float): The heighest value of the material property
             scalar (Callable | None, optional): The scalar value function returning a float/complex. Defaults to None.
@@ -285,52 +227,37 @@ class FreqCoordDependent(MatProperty, Saveable):
 
         """
         if scalar is not None:
-
             def _func(f, x, y, z) -> np.ndarray:
-                return np.eye(3)[:, :, None] * scalar(f, x, y, z)[None, None, :]
-
+                return np.eye(3)[:, :, None] * scalar(f,x,y,z)[None, None, :]
+        
         if vector is not None:
-
-            def _func(f, x, y, z) -> np.ndarray:
+            def _func(f,x, y, z) -> np.ndarray:
                 N = x.shape[0]
-                out = np.zeros((3, 3, N), dtype=vector(1e9, 0, 0, 0).dtype)
+                out = np.zeros((3, 3, N), dtype=vector(1e9,0,0,0).dtype)
                 idx = np.arange(3)
-                out[idx, idx, :] = vector(f, x, y, z)
+                out[idx, idx, :] = vector(f,x,y,z)
                 return out
-
+        
         if matrix is not None:
             _func = matrix
 
         self._func: Callable = _func
-
-        self._apply_to: np.ndarray = np.array([], dtype=np.int64)
-        self._x: np.ndarray = np.array([], dtype=np.float64)
-        self._y: np.ndarray = np.array([], dtype=np.float64)
-        self._z: np.ndarray = np.array([], dtype=np.float64)
-
+        
         self._fmax: Callable = lambda f: max_value
-
-    def initialize(
-        self, x: np.ndarray, y: np.ndarray, z: np.ndarray, ids: np.ndarray
-    ) -> None:
-        self._apply_to = np.concatenate([self._apply_to, ids])
-        self._x = np.concatenate([self._x, x])
-        self._y = np.concatenate([self._y, y])
-        self._z = np.concatenate([self._z, z])
-
-    def __call__(self, f: float, data: np.ndarray) -> np.ndarray:
-        data[:, :, self._apply_to] = self._func(f, self._x, self._y, self._z)
+        
+    def __call__(self, f: float, data: np.ndarray, coords: np.ndarray, ids: np.ndarray) -> np.ndarray:
+        xs = coords[0,ids]
+        ys = coords[1,ids]
+        zs = coords[2,ids]
+        data[:,:,ids] = self._func(f,xs,ys,zs)
         return data
-
+    
     @property
     def value(self) -> float:
-        raise ValueError(
-            "Frequency and coordinate dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency and coordinate."
-        )
-
+        raise ValueError('Frequency and coordinate dependent material properties have no fixed value. Use the scalar(f) method to get the value at a specific frequency and coordinate.')
+    
     def scalar(self, f: float):
-        return self._func(f, 0, 0, 0)[0, 0]
-
+        return self._func(f, 0,0,0)[0,0]
 
 class Material(Saveable):
     """The Material class generalizes a material in the EMerge FEM environment.
@@ -346,6 +273,8 @@ class Material(Saveable):
     to supply a frequency and coordinate dependent property use: emerge.FreqCoordDependent()
 
     """
+    _matnames: list[str] = []
+    _namectr: int = 0
 
     _pickle_exclude = {"_neff"}
     skip_fields = ("_neff",)
@@ -363,7 +292,7 @@ class Material(Saveable):
         color: str = "#BEBEBE",
         opacity: float = 1.0,
         _metal: bool = False,
-        name: str = "unnamed",
+        name: str | None = None,
     ):
 
         if not isinstance(er, MatProperty):
@@ -407,6 +336,21 @@ class Material(Saveable):
             self._neff: Callable = lambda f: _neff
         self._metal: bool = _metal
 
+        if self.name is None:
+            self.name = self._generate_name()
+        
+    @classmethod
+    def _generate_name(cls) -> str:
+        i = cls._namectr
+        while True:
+            name = f'UnnamedMaterial_{i}'
+            if name not in cls._matnames:
+                cls._matnames.append(name)
+                cls._namectr = i+1
+                break
+            i += 1
+        return name
+
     @property
     def _color_rgb(self) -> tuple[float, float, float]:
         return tuple(
@@ -425,48 +369,14 @@ class Material(Saveable):
         for k in self._pickle_exclude:
             setattr(self, k, None)
 
-    def __hash__(self):
-        return self._hash_key
-
+    def __hash__(self) -> int:
+        return id(self)
+    
     def __str__(self) -> str:
-        return f"Material({self.name}, {self._hash_key})"
+        return f"Material({self.name})"
 
     def __repr__(self):
-        return f"Material({self.name}, {self._hash_key})"
-
-    def initialize(
-        self, xs: np.ndarray, ys: np.ndarray, zs: np.ndarray, ids: np.ndarray
-    ):
-        """Initializes the Material properties to be evaluated at xyz-coordinates for
-        a given set of tetrahedral ids.
-
-        Args:
-            xs (np.ndarray): The tet-centroid x-coordinates
-            ys (np.ndarray): The tet-centroid y-coordinates
-            zs (np.ndarray): The tet-centroid z-coordinates
-            ids (np.ndarray): The tet-indices
-        """
-        self.er.initialize(xs, ys, zs, ids)
-        self.ur.initialize(xs, ys, zs, ids)
-        self.tand.initialize(xs, ys, zs, ids)
-        self.cond.initialize(xs, ys, zs, ids)
-
-        self.density.initialize(xs, ys, zs, ids)
-        self.specific_heat.initialize(xs, ys, zs, ids)
-        self.cond_thermal.initialize(xs, ys, zs, ids)
-
-    def reset(self) -> None:
-        """Resets assignment of material properties to coordiantes and tetrahedral indices."""
-        self.er.reset()
-        self.ur.reset()
-        self.tand.reset()
-        self.cond.reset()
-
-        self.density.reset()
-        self.specific_heat.reset()
-        self.cond_thermal.reset()
-
-        self._hash_key = -1
+        return f"Material({self.name})"
 
     @property
     def frequency_dependent(self) -> bool:
@@ -527,8 +437,7 @@ class Material(Saveable):
             scalar=lambda f: conductivity / (1 - 1j * 2 * np.pi * f * colission_dist)
         )
         return Material(er, ur, 0.0, fsigma, color=color, opacity=opacity, _metal=metal)
-
-
+    
 AIR = Material(
     color="EMERGE-AIR",
     opacity="EMERGE-AIR",

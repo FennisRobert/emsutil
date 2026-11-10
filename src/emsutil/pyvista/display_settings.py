@@ -27,6 +27,23 @@ class _Cycler:
         self._i = 0
 
 
+GLOBAL_COLORMAPS = {
+    "classic": (
+        [
+            "#323b98",
+            "#4154a6",
+            "#4d73b7",
+            "#73c6e8",
+            "#8dc8a7",
+            "#b7d35e",
+            "#f5ee51",
+            "#e99740",
+            "#da4831",
+            "#892725",
+        ],
+        (0.0, 0.1, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 1.0),
+    ),
+}
 DEFAULT_CNAME_MAP = {
     "EMERGE-PEC": "#ff78aa",
     "EMERGE-DIEL": "#10ad10",
@@ -97,12 +114,16 @@ class EMergeTheme:
         self.label_color: str = "#FFFFFF"
         self.text_color: str = "#000000"
         self.text_size: int = 25
+        self.text_font: Literal["arial", "courier", "times"] = "arial"
 
         # Geometry
         self.geo_edge_color: str = "#000000"
         self.geo_edge_width: float = 2.0
         self.geo_mesh_width: float = 1.0
         self.geo_mesh_color: str = "#000000"
+        # Outlines geometry with geo_edge_color/geo_edge_width, plus edges sharper than silhouette_angle (degrees)
+        self.render_silhouette: bool = False
+        self.silhouette_angle: float = 30.0
 
         # Materials and rendering
         self.render_ambient = 0.1
@@ -115,6 +136,11 @@ class EMergeTheme:
         self.render_metal_roughness: float = 0.3
         self.render_metallic: float = 0.8
         self.render_min_opacity: float = 0.0
+
+        # 1-bit dithering: renders surfaces as black and white dot patterns (disables anti-aliasing)
+        self.render_dither: bool = False
+        self.dither_cell: int = 4  # dot size in pixels
+        self.dither_levels: int = 0  # density steps, 0 = all 17 Bayer levels
 
         # Color modifiers
         self.brightness: float = 1.0
@@ -170,6 +196,9 @@ class EMergeTheme:
         self.streamline_kwarg: dict = dict()
         self.text_kwarg = dict()
 
+        # logo
+        self.logo_path: str | None = None
+        
         self.define()
         self._init()
 
@@ -196,9 +225,15 @@ class EMergeTheme:
 
     def parse_cmap_name(self, name: str) -> LinearSegmentedColormap | str:
         """Returns a colormap by name if it exists."""
-        if name not in self.colormaps:
+        if name not in self.colormaps and name not in GLOBAL_COLORMAPS:
             return name
-        return make_colormap(*self.colormaps[name], N=self.cmap_npts)
+        
+        if name in self.colormaps:
+            cmap_data = self.colormaps[name]
+        else:
+            cmap_data = GLOBAL_COLORMAPS[name]
+        
+        return make_colormap(*cmap_data, N=self.cmap_npts)
 
     def parse_opacity(self, value: str | float) -> float:
         """Parses an opacity value or string to a float"""

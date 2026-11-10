@@ -16,18 +16,28 @@
 # <https://www.gnu.org/licenses/>.
 
 from __future__ import annotations
-from .display_settings import PVDisplaySettings, EMergeTheme
 
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import wraps
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
+
 import numpy as np
 import pyvista as pv
-from typing import Literal, Callable, Any
 from loguru import logger
-from pathlib import Path
-from importlib.resources import files
-from .utils import determine_projection_data
-from ..emdata import FieldPlotData, DataStructure
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from vtkmodules.vtkCommonDataModel import vtkPolyData
+from vtkmodules.vtkCommonExecutionModel import vtkTrivialProducer
+from vtkmodules.vtkRenderingCore import vtkActor2D, vtkProp3D
+from vtkmodules.vtkRenderingLabel import vtkLabelPlacementMapper
 
+from ..emdata import DataStructure, FieldPlotData, VectorFieldMagnitudeProxy
+from .display_settings import EMergeTheme, PVDisplaySettings
+from .dither import apply_dither
+from .utils import determine_projection_data
 
 ### Color scale
 
@@ -80,7 +90,7 @@ def nanminmax(arr):
 
 # Data processing
 
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, cKDTree
 
 
 def _min_distance(xs, ys, zs):
@@ -109,25 +119,249 @@ def _min_distance(xs, ys, zs):
     closest_neighbor_distances = distances[:, 1]
     return float(np.min(closest_neighbor_distances))
 
+def _mean_distance(xs, ys, zs, n_samples: int = 2000, seed: int = 0):
+    """Approximates the mean nearest-neighbour distance in a point cloud.
 
-def get_transformation(scale: Literal["log", "symlog", "lin"]) -> Callable:
-    """Return a transformation callable to transform a scalar
-    dataset according to a log, symmetric-log or linear scale.
+    The KD-Tree is built on all points (needed for correct neighbour distances),
+    but only a random subset of ``n_samples`` points is queried. Building is
+    O(N log N) with fast settings; querying is O(n_samples log N), so the cost
+    is dominated by the build even for very large datasets.
 
-    Args:
-        scale (Literal[&quot;log&quot;, &quot;symlog&quot;, &quot;lin&quot;]): _description_
+    Parameters:
+    -----------
+    xs, ys, zs : np.ndarray
+        Coordinate arrays of equal length N.
+    n_samples : int
+        Number of query points used to estimate the mean.
+    seed : int
+        Seed for the sample selection (keeps results reproducible).
 
     Returns:
-        Callable: _description_
+    --------
+    float
+        The (approximate) mean distance from a point to its nearest neighbour.
     """
-    if scale == "log":
-        T = lambda x: np.log10(np.abs(x + 1e-12))
-    elif scale == "symlog":
-        T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-    else:
-        T = lambda x: x
-    return T
+    points = np.column_stack((xs, ys, zs)).astype(np.float64, copy=False)
+    N = len(points)
 
+    if N < 2:
+        return 0.0
+
+    tree = cKDTree(points, balanced_tree=False, compact_nodes=False)
+
+    if N > n_samples:
+        idx = np.random.default_rng(seed).choice(N, size=n_samples, replace=False)
+        query = points[idx]
+    else:
+        query = points
+
+    distances, _ = tree.query(query, k=2)
+    return float(np.mean(distances[:, 1]))
+
+def _resample_unstructured(field: FieldPlotData, npts: int = 50) -> FieldPlotData:
+    """Linearly interpolates an unstructured scalar point cloud onto a regular grid.
+
+    The largest axis is sampled with ``npts`` points, the other axes with the same
+    spacing. If all points lie in an axis-aligned plane, a GRID2D dataset is returned
+    with NaN outside the convex hull (which add_surf removes). Otherwise a GRID3D
+    dataset is returned with zeros outside the convex hull. Complex values are
+    preserved so the result can still be animated.
+
+    Parameters:
+    -----------
+    field : FieldPlotData
+        An UNSTRUCTURED dataset with scalar values F.
+    npts : int
+        Number of sample points along the largest axis.
+
+    Returns:
+    --------
+    FieldPlotData
+        The resampled GRID2D or GRID3D dataset.
+    """
+    from scipy.interpolate import LinearNDInterpolator
+
+    pts = np.column_stack(
+        (np.ravel(field.x), np.ravel(field.y), np.ravel(field.z))
+    ).astype(np.float64)
+
+    # A magnitude proxy would collapse to a real array when interpolated, losing
+    # the phase needed for animation. Interpolate its components instead.
+    is_proxy = isinstance(field.F, VectorFieldMagnitudeProxy)
+    if is_proxy:
+        F = np.column_stack(
+            (np.ravel(field.F.x), np.ravel(field.F.y), np.ravel(field.F.z))
+        )
+    else:
+        F = np.ravel(field.F)
+
+    pmin = pts.min(axis=0)
+    pmax = pts.max(axis=0)
+    span = pmax - pmin
+    active = span > 1e-9 * span.max()
+    ds = span.max() / (npts - 1)
+
+    axes = [
+        np.linspace(pmin[i], pmax[i], max(round(span[i] / ds) + 1, 2))
+        if active[i]
+        else np.array([pmin[i]])
+        for i in range(3)
+    ]
+    X, Y, Z = np.meshgrid(*axes)
+    grid_pts = np.column_stack((X.ravel(), Y.ravel(), Z.ravel()))
+
+    if active.sum() == 3:
+        fill = 0.0
+        structure = DataStructure.GRID3D
+    elif active.sum() == 2:
+        fill = np.nan
+        structure = DataStructure.GRID2D
+    else:
+        raise ValueError(
+            f"Cannot resample {field.name}: the points must span a plane or a volume."
+        )
+
+    interp = LinearNDInterpolator(pts[:, active], F, fill_value=fill)
+    Fi = interp(grid_pts[:, active])
+
+    if is_proxy:
+        comps = [Fi[:, i].reshape(X.shape) for i in range(3)]
+    else:
+        comps = [Fi.reshape(X.shape)]
+
+    if structure == DataStructure.GRID2D:
+        # Drop the singleton axis of the flat dimension
+        X, Y, Z = (A.squeeze() for A in (X, Y, Z))
+        comps = [C.squeeze() for C in comps]
+
+    Fgrid = type(field.F)(*comps) if is_proxy else comps[0]
+
+    return FieldPlotData(x=X, y=Y, z=Z, F=Fgrid, structure=structure, name=field.name)
+
+# Colour that each direction axis lights up in add_vector_cloud
+_AXIS_COLORS = {
+    "r": (1.0, 0.0, 0.0),
+    "g": (0.0, 1.0, 0.0),
+    "b": (0.0, 0.0, 1.0),
+    "c": (0.0, 1.0, 1.0),
+    "m": (1.0, 0.0, 1.0),
+    "y": (1.0, 1.0, 0.0),
+}
+
+
+def _direction_rgba(
+    V: np.ndarray,
+    alpha_fn: Callable[[np.ndarray], np.ndarray],
+    color_mapping: tuple[str, str, str],
+    vivid: bool,
+    gamma: float = 0.8,
+) -> np.ndarray:
+    """Maps real vectors to RGBA colours: the direction axis sets the colour, magnitude the alpha.
+
+    Each direction axis lights up its own colour, weighted by the absolute value of that
+    component of the unit direction, so a direction and its opposite share a colour (with the
+    default mapping x is red, y green and z blue, and in-between directions mix). The colour
+    shows the axis a field points along, independent of its sign, so field rotation shows as
+    a colour shift.
+
+    Parameters:
+    -----------
+    V : np.ndarray
+        Real vectors of shape (N, 3).
+    alpha_fn : Callable
+        Maps the vector magnitudes to alpha values between 0 and 1.
+    color_mapping : tuple[str, str, str]
+        The colour for the x, y and z axis from r, g, b, c, m and y, e.g. ("r", "g", "b") or
+        ("c", "m", "y"). The three colours must be linearly independent.
+    vivid : bool
+        Scales the strongest channel to full brightness, so every direction is equally bright.
+        Otherwise in-between directions are dimmer, and only mixes that would exceed full
+        brightness are scaled down.
+    gamma : float
+        Exponent on the direction weights before mixing. With 1 the hue changes slowly near
+        the axes and quickly near the diagonals, so axis colours dominate; 0.8 spreads the hue
+        almost evenly over the angle (within 2 degrees).
+
+    Returns:
+    --------
+    np.ndarray
+        RGBA values of shape (N, 4) as uint8.
+    """
+    if len(color_mapping) != 3 or any(c not in _AXIS_COLORS for c in color_mapping):
+        raise ValueError(
+            f"color_mapping must give three colours from r, g, b, c, m and y, e.g. ('r', 'g', 'b'). Got {color_mapping}."
+        )
+    # Columns are the colours of the x, y and z axis
+    M = np.array([_AXIS_COLORS[c] for c in color_mapping]).T
+    if abs(np.linalg.det(M)) < 1e-9:
+        raise ValueError(
+            f"The colours in color_mapping {color_mapping} are not independent (one is a mix of the other two), "
+            "so different directions would get the same colour."
+        )
+
+    mag = np.linalg.norm(V, axis=1)
+    u = (np.abs(V) / np.where(mag > 0, mag, 1.0)[:, None]) ** gamma
+
+    # Element-wise instead of u @ M.T: matmul on macOS Accelerate emits spurious divide-by-zero warnings
+    rgb = (u[:, :, None] * M.T[None, :, :]).sum(axis=1)
+    # Mixed colours (e.g. cyan + magenta) can exceed full brightness, scale those back down
+    peak = rgb.max(axis=1)
+    if vivid:
+        rgb = rgb / np.maximum(peak, 1e-12)[:, None]
+    else:
+        rgb = rgb / np.maximum(peak, 1.0)[:, None]
+
+    alpha = np.clip(alpha_fn(mag), 0.0, 1.0)
+    rgba = np.column_stack((rgb, alpha))
+    return np.round(255 * rgba).astype(np.uint8)
+
+
+def _prop_matrix(prop: vtkProp3D) -> np.ndarray:
+    """The 4x4 model-to-world matrix of an actor (position, orientation, scale, user matrix)."""
+    return pv.array_from_vtkmatrix(prop.GetMatrix())
+
+
+def _to_world(prop: vtkProp3D, points: np.ndarray) -> np.ndarray:
+    """Maps (N,3) dataset points of an actor to world coordinates."""
+    M = _prop_matrix(prop)
+    return np.asarray(points) @ M[:3, :3].T + M[:3, 3]
+
+
+def _to_local(prop: vtkProp3D, points: np.ndarray) -> np.ndarray:
+    """Maps (N,3) world points to the dataset coordinates of an actor."""
+    M = np.linalg.inv(_prop_matrix(prop))
+    return np.asarray(points) @ M[:3, :3].T + M[:3, 3]
+
+
+def ruler_snap_points(objects: Iterable[tuple[pv.DataSet, vtkProp3D]]):
+    """Collect vertices along sharp edges and boundaries in world coordinates."""
+    chunks = []
+
+    for mesh, actor in objects:
+        if mesh.n_points == 0:
+            continue
+
+        surface = mesh.extract_surface(algorithm="dataset_surface").clean()
+
+        if surface.n_cells == 0:
+            points = surface.points
+        else:
+            edges = surface.extract_feature_edges(
+                feature_angle=30,
+                boundary_edges=True,
+                non_manifold_edges=True,
+                feature_edges=True,
+                manifold_edges=False,
+            )
+            points = edges.points
+
+        if len(points):
+            chunks.append(_to_world(actor, points))
+
+    if not chunks:
+        return np.empty((0, 3))
+
+    return np.unique(np.vstack(chunks), axis=0)
 
 class _RunState:
     def __init__(self):
@@ -147,21 +381,6 @@ class _RunState:
 
 
 ANIM_STATE = _RunState()
-
-
-def setdefault(options: dict, **kwargs) -> dict:
-    """Shorthand for overwriting non-existent keyword arguments with defaults
-
-    Args:
-        options (dict): The kwargs dict
-
-    Returns:
-        dict: the kwargs dict
-    """
-    for key in kwargs.keys():
-        if options.get(key, None) is None:
-            options[key] = kwargs[key]
-    return options
 
 
 def _logscale(dx, dy, dz):
@@ -241,13 +460,129 @@ class _AnimObject:
         self.on_update(self, phi)
 
 
+def _address(obj: Any) -> str:
+    """Identifies a VTK object. Pyvista may hand out new Python wrappers for the same actor,
+    so id() is not stable."""
+    return obj.GetAddressAsString("vtkObject")
+
+
+def _label_points(actor: vtkActor2D) -> vtkPolyData | None:
+    """The source point data of a point label actor (upstream of any visibility filters)."""
+    algorithm = actor.GetMapper().GetInputAlgorithm()
+    while algorithm is not None and algorithm.GetNumberOfInputConnections(0) > 0:
+        upstream = algorithm.GetInputAlgorithm()
+        if isinstance(upstream, vtkTrivialProducer):
+            return algorithm.GetInputDataObject(0, 0)
+        algorithm = upstream
+    return None
+
+
+@dataclass
+class _CbarSpec:
+    """Colorbar settings for the next plot call, set through EMergeDisplay.cbar."""
+
+    show: bool = True
+    title: str | None = None
+    n_labels: int = 5
+    interactive: bool = False
+    clim: tuple[float, float] | None = None
+
+
+class _PlotItem:
+    """All actors created by one plot call, such as a geometry with its edge lines and labels.
+
+    The item is the unit that is exploded, picked, highlighted and saved.
+    """
+
+    def __init__(self, props: list[vtkProp3D] | None = None):
+        self.props: list[vtkProp3D] = [] if props is None else props
+        # Point data of label actors. Labels are 2D actors anchored at these world points.
+        self.labels: list[vtkPolyData] = []
+
+        # Selection data, set through EMergeDisplay._add_selectable
+        self.name: str | None = None
+        self.mesh: pv.DataSet | None = None
+        self.actor: vtkProp3D | None = None
+
+    def collect(self, actors: Iterable[Any]) -> None:
+        """Adds the 3D actors and point labels among actors to this item."""
+        for actor in actors:
+            if isinstance(actor, vtkProp3D):
+                self.props.append(actor)
+            elif isinstance(actor, vtkActor2D) and isinstance(
+                actor.GetMapper(), vtkLabelPlacementMapper
+            ):
+                points = _label_points(actor)
+                if points is not None:
+                    self.labels.append(points)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.props and not self.labels
+
+    @property
+    def datasets(self) -> list[pv.DataSet]:
+        """The unique datasets rendered by the actors of this item."""
+        datasets = dict()
+        for prop in self.props:
+            mapper = getattr(prop, "mapper", None)
+            dataset = getattr(mapper, "dataset", None)
+            if dataset is not None:
+                datasets.setdefault(dataset.memory_address, dataset)
+        return list(datasets.values())
+
+    def center(self) -> np.ndarray | None:
+        """The world space center of the bounding box, None if the item has no geometry."""
+        points = [
+            np.reshape(prop.GetBounds(), (3, 2)).T
+            for prop in self.props
+            if prop.GetBounds()[0] <= prop.GetBounds()[1]
+        ]
+        points += [
+            vtk_to_numpy(label.GetPoints().GetData())
+            for label in self.labels
+            if label.GetNumberOfPoints() > 0
+        ]
+        if not points:
+            return None
+        points = np.vstack(points)
+        return (points.min(axis=0) + points.max(axis=0)) / 2
+
+    def translate(self, offset: np.ndarray) -> None:
+        """Moves the item by offset through the actor transforms. The plotted data is not changed."""
+        for prop in self.props:
+            prop.AddPosition(*offset)
+        for label in self.labels:
+            points = vtk_to_numpy(label.GetPoints().GetData())
+            points += offset
+            label.GetPoints().Modified()
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def plot_item(method: _F) -> _F:
+    """Decorator for plot methods: everything the call adds becomes one _PlotItem.
+
+    Calls nested inside another decorated call join the outer item.
+    Typed to return the decorated method's own signature, so editors keep its argument hints.
+    """
+
+    @wraps(method)
+    def wrapper(self: EMergeDisplay, *args, **kwargs):
+        with self._item():
+            return method(self, *args, **kwargs)
+
+    return cast(_F, wrapper)
+
+
 class EMergeDisplay:
     def __init__(self, *args, **kwargs):
 
         self.set: PVDisplaySettings = PVDisplaySettings()
 
         # Animation options
-        self._facetags: list[int] = []
+        self._facetags: dict[int, str] = dict()
         self._stop: bool = False
         self._objs: list[_AnimObject] = []
         self._do_animate: bool = False
@@ -255,11 +590,11 @@ class EMergeDisplay:
         self._closed_via_x: bool = False
         self._Nsteps: int = 0
         self._fps: int = 25
-        self._ruler: ScreenRuler = ScreenRuler(self, 0.001)
+        self._orbit: dict | None = None
+        self._ruler: ScreenRuler = ScreenRuler(self)
         self._selector: ScreenSelector = ScreenSelector(self)
-        self._stop = False
-        self._objs = []
-        self._data_sets: list[pv.DataSet] = []
+        self._items: list[_PlotItem] = []
+        self._current_item: _PlotItem | None = None
 
         self._plot: pv.Plotter | None = None
         self._generate_plotter()
@@ -272,17 +607,11 @@ class EMergeDisplay:
         self.highlight_actor = None
         self.highlight_text_actor = None
         self._cycle_pos: int = 0
-        self._obj_cycler: list[str] = []
-        self._selectable_objects: dict[str:dict] = dict()
+        self._obj_cycler: list[_PlotItem] = []
 
         self._bounds: tuple[float, float, float, float, float, float] | None = None
-        self._cbar_args: dict = {}
-        self._cbar_lim: tuple[float, float] | None = None
+        self._cbar: _CbarSpec = _CbarSpec()
         self.camera_position = (1, -1, 1)  # +X, +Z, -Y
-
-        self._plot.track_click_position(
-            callback=self._on_click, side="right", viewport=True
-        )
 
         self.__post_init__(*args, **kwargs)
 
@@ -320,70 +649,180 @@ class EMergeDisplay:
             return self.set.theme.parse_opacity(value)
 
     @staticmethod
-    def _awd(values: dict, default: dict) -> dict:
+    def _append_with_defaults(values: dict, *defaults: dict) -> dict:
         """Append with default. Overwrites detault dict entries with values"""
         out = dict()
-        out.update(default)
+        for default in defaults:
+            out.update(default)
         out.update(values)
         return out
 
+    def _get_logo_path(self) -> str | None:
+        """Optional return of a logo path
+
+        Returns:
+            str | None: _description_
+        """
+        return self.set.theme.logo_path
     ############################################################
     #                        GENERIC METHODS                   #
     ############################################################
 
+    @contextmanager
+    def explode(
+        self,
+        ds: tuple[float, float, float] | np.ndarray = (0, 0, 0.004),
+        tol: float | None = None,
+    ) -> Iterator[EMergeDisplay]:
+        """Explodes everything plotted inside the with-block along the direction of ds.
+
+        Plotted items are sorted by the position of their center along ds and grouped into
+        layers. Layer k (starting at 0) is displaced by k*ds. Only the actor transforms are
+        changed so the underlying data, animation and picking remain intact.
+
+        Example:
+            >>> with display.explode(ds=(0, 0, 0.004)):
+            ...     display.add_object(...)
+
+        Args:
+            ds (tuple[float, float, float] | np.ndarray): The displacement between two
+                consecutive layers. Defaults to (0, 0, 0.004).
+            tol (float | None): Items whose center lies within tol of the previous item
+                along ds share a layer. Defaults to 0.1% of the spread of all items.
+        """
+        n_items = len(self._items)
+        before = {_address(actor) for actor in self._plot.renderer.actors.values()}
+        try:
+            yield self
+        finally:
+            items = self._items[n_items:]
+
+            # Actors added outside of a plot item are exploded on their own
+            known = before | {_address(prop) for item in items for prop in item.props}
+            items += [
+                _PlotItem([actor])
+                for actor in self._plot.renderer.actors.values()
+                if isinstance(actor, vtkProp3D) and _address(actor) not in known
+            ]
+            self._explode_items(items, np.asarray(ds, dtype=float), tol)
+
+    @staticmethod
+    def _explode_items(
+        items: list[_PlotItem], ds: np.ndarray, tol: float | None
+    ) -> None:
+        """Displaces each item by k*ds where k is the index of its layer along ds."""
+        length = np.linalg.norm(ds)
+        if length == 0:
+            return
+
+        centered = [(item, item.center()) for item in items]
+        centered = [(item, center) for item, center in centered if center is not None]
+        if not centered:
+            return
+
+        items = [item for item, _ in centered]
+        keys = np.array([center @ ds / length for _, center in centered])
+        if tol is None:
+            tol = 1e-3 * (keys.max() - keys.min())
+
+        order = np.argsort(keys)
+        layer = 0
+        previous = keys[order[0]]
+        for i in order:
+            if keys[i] - previous > tol:
+                layer += 1
+            previous = keys[i]
+            items[i].translate(layer * ds)
+
     def cbar(
         self,
-        name: str,
+        name: str | bool | None,
         n_labels: int = 5,
         interactive: bool = False,
         clim: tuple[float, float] | None = None,
     ) -> EMergeDisplay:
+        """Configure the colorbar settings for the next plot call to be made.
 
-        self._cbar_args = dict(
-            title=name,
+        Args:
+            name (str | None): The colorbar title (shared between multiple plots of the same name).
+                None or False hides the colorbar of the next plot.
+            n_labels (int, optional): The number of color-bar value labels. Defaults to 5.
+            interactive (bool, optional): If the colorbar should be set to interactive mode. Defaults to False.
+            clim (tuple[float, float] | None, optional): The color-limits (manual overwrite), also applied
+                when the colorbar is hidden. Defaults to None.
+
+        Returns:
+            EMergeDisplay: This same object instance
+        """
+        show = name not in (None, False)
+        self._cbar = _CbarSpec(
+            show=show,
+            title=str(name) if show and name is not True else None,
             n_labels=n_labels,
             interactive=interactive,
-            title_font_size=26,
-            label_font_size=25,
-            unconstrained_font_size=True,
+            clim=clim,
         )
-        self._cbar_lim = clim
         return self
 
-    def _cbar_defaults(self, **kwargs):
-        """overwrite Defaults kwargs for _cbar_args."""
-        defaults = dict(
+    def _add_scalar_bar(self, actor: pv.Actor | pv.Volume, title: str) -> None:
+        """Adds the colorbar for actor according to the cbar() settings.
+
+        Plot calls pass show_scalar_bar=False to pyvista and call this afterwards, so the font size
+        settings work for every plot type. title is used when cbar() set none.
+        """
+        spec = self._cbar
+        if not spec.show:
+            return
+        self._plot.add_scalar_bar(
+            title=spec.title if spec.title is not None else title,
+            mapper=actor.mapper,
+            n_labels=spec.n_labels,
+            interactive=spec.interactive,
             title_font_size=26,
             label_font_size=24,
             color=self.set.theme.text_color,
             unconstrained_font_size=True,
         )
-        defaults.update(kwargs)
-
-        self._cbar_args = self._awd(self._cbar_args, defaults)
 
     def _wrap_plot(self, *args, **kwargs) -> pv.Actor:
-        """Performs plot operations to handle Pyvistas behavior better"""
-
-        # Scalar bars are handled separately in order to make font size changes work
-        if "scalar_bar_args" in kwargs and kwargs.get("show_scalar_bar", True):
-            sbarargs = kwargs.pop("scalar_bar_args")
-        else:
-            sbarargs = None
-
-        # Make the plot call without scalar bar
+        """add_mesh without pyvista's own colorbar; plot calls add theirs through _add_scalar_bar."""
         kwargs["show_scalar_bar"] = False
-        actor = self._plot.add_mesh(*args, **kwargs)
+        return self._plot.add_mesh(*args, **kwargs)
 
-        # Add the scalar bar separately.
-        if sbarargs is not None:
-            self._plot.add_scalar_bar(**sbarargs)
-        self._data_sets.append(actor.mapper.dataset)
-        return actor
+    @contextmanager
+    def _item(self) -> Iterator[_PlotItem]:
+        """Collects all actors added inside the block into one _PlotItem.
 
-    def _reset_cbar(self) -> None:
-        self._cbar_args: dict = {}
-        self._cbar_lim: tuple[float, float] | None = None
+        Nested blocks join the outermost item.
+        """
+        if self._current_item is not None:
+            yield self._current_item
+            return
+
+        item = _PlotItem()
+        self._current_item = item
+        before = {_address(actor) for actor in self._plot.renderer.actors.values()}
+        try:
+            yield item
+        finally:
+            self._current_item = None
+            # The cbar() settings apply to one (outermost) plot call
+            self._cbar = _CbarSpec()
+            item.collect(
+                actor
+                for actor in self._plot.renderer.actors.values()
+                if _address(actor) not in before
+            )
+            if not item.is_empty or item.name is not None:
+                self._items.append(item)
+
+    @property
+    def _data_sets(self) -> list[pv.DataSet]:
+        return [dataset for item in self._items for dataset in item.datasets]
+
+    @property
+    def _selectable_items(self) -> list[_PlotItem]:
+        return [item for item in self._items if item.name is not None]
 
     def _wire_close_events(self):
         self._closed = False
@@ -424,7 +863,7 @@ class EMergeDisplay:
         self._plot = pv.Plotter()
 
         self._plot.add_key_event("m", self.activate_ruler)  # type: ignore
-        self._plot.add_key_event("f", self.activate_object)  # type: ignore
+        self._plot.add_key_event("g", self.activate_object)  # type: ignore
         self._plot.add_key_event("x", self.view_x)  # type: ignore
         self._plot.add_key_event("y", self.view_y)  # type: ignore
         self._plot.add_key_event("z", self.view_z)  # type: ignore
@@ -432,6 +871,9 @@ class EMergeDisplay:
         self._plot.add_key_event("i", self.view_iso)
         self._plot.add_key_event("Right", self._on_next_obj)
         self._plot.add_key_event("Left", self._on_prev_obj)
+        self._plot.track_click_position(
+            callback=self._on_click, side="right", viewport=True
+        )
 
     def _on_click(self, click_pos):
         x, y = click_pos
@@ -450,28 +892,28 @@ class EMergeDisplay:
         ray_end = np.array(renderer.GetWorldPoint()[:3])
 
         hits = []
-        for name, info in self._selectable_objects.items():
-            mesh = info["mesh"]
-            actor = info["actor"]
+        for item in self._selectable_items:
+            mesh = item.mesh
+            actor = item.actor
             if not isinstance(mesh, pv.PolyData):
                 surface = mesh.extract_surface(algorithm="dataset_surface")
             else:
                 surface = mesh
 
-            points, cells = surface.ray_trace(ray_start, ray_end)
+            local_start, local_end = _to_local(actor, np.array([ray_start, ray_end]))
+            points, cells = surface.ray_trace(local_start, local_end)
             if len(points) > 0:
-                point = points[0, :]
+                point = _to_world(actor, points[:1])[0]
                 distance = np.linalg.norm(point - ray_start)
-                hits.append((distance, name))
+                hits.append((distance, item))
 
         hits.sort(key=lambda x: x[0])
 
         self._cycle_pos = 0
         self._obj_cycler = []
-        if hits:
-            for dist, name in hits:
-                print(f" -> {name} (distance: {dist:.2f})")
-                self._obj_cycler.append(name)
+        for dist, item in hits:
+            print(f" -> {item.name} (distance: {dist:.2f})")
+            self._obj_cycler.append(item)
 
         self._highlight_object()
 
@@ -489,9 +931,7 @@ class EMergeDisplay:
             self._plot.remove_actor(self.highlight_actor)
             self.highlight_actor = None
 
-        if self.highlight_text_actor is not None:
-            self._plot.remove_actor(self.highlight_text_actor)
-            self.highlight_text_actor = None
+        self._clear_highlight_text()
 
     def _highlight_object(self) -> None:
         """Removes the old highlight and draws a new glowing edge outline around the selected mesh."""
@@ -499,8 +939,8 @@ class EMergeDisplay:
         if len(self._obj_cycler) == 0:
             return
 
-        name = self._obj_cycler[self._cycle_pos % len(self._obj_cycler)]
-        mesh_data = self._selectable_objects[name]["mesh"]
+        item = self._obj_cycler[self._cycle_pos % len(self._obj_cycler)]
+        mesh_data = item.mesh
 
         self._clear_highlight()
 
@@ -522,7 +962,8 @@ class EMergeDisplay:
                     "EMERGE-SELECT", self.set.theme.default_opacity
                 ),
             )
-            self.highlight_text_actor = self.add_text(name, position="upper_edge")
+            self.highlight_actor.user_matrix = _prop_matrix(item.actor)
+            self._set_highlight_text(item.name)
 
         # 4. Force the plotter to re-render the scene immediately
         self._plot.render()
@@ -613,19 +1054,32 @@ class EMergeDisplay:
             theme (EMergeTheme): The theme to set.
         """
         self.set.theme = theme
+        pv.global_theme.font.family = theme.text_font
 
-    def show(self, screenshot: str | None = None, off_screen: bool = False):
-        """Shows the Pyvista display."""
+    def show(self, screenshot: str | None = None, off_screen: bool = False, zoom: float = 1.0):
+        """Shows the Pyvista display.
+
+        Args:
+            screenshot (str | None, optional): If given, saves a screenshot to this file instead of opening a window. Defaults to None.
+            off_screen (bool, optional): Render without opening a window. Defaults to False.
+            zoom (float, optional): Camera zoom factor applied to the default view; values above 1 zoom in.
+                Also applies to screenshots and orbit recordings. Defaults to 1.0.
+        """
 
         self._plot.off_screen = off_screen
         pv.OFF_SCREEN = off_screen
 
-        self._ruler.min_length = self._get_edge_length()
         self._update_camera()
         self._add_aux_items()
         self._apply_theme()
 
-        if self._do_animate and screenshot is None:
+        if zoom != 1.0:
+            self._plot.camera.zoom(zoom)
+            self._plot.reset_camera_clipping_range()
+
+        if self._orbit is not None and self._orbit["record"] is not None and screenshot is None:
+            self._record(self._orbit["record"])
+        elif (self._do_animate or self._orbit is not None) and screenshot is None:
             self._wire_close_events()
             self.add_text("Press Q to close!", color="red", position="upper_left")
             self._plot.show(
@@ -641,6 +1095,83 @@ class EMergeDisplay:
                 self._plot.show()
 
         self._reset()
+
+    def _parse_cmap_name(self, cmap: str, default: str | None = None) -> str:
+        """Universal pipeline for cmap parsing
+
+        Args:
+            cmap (str): _description_
+
+        Returns:
+            str: _description_
+        """
+        if default is None:
+            default = self.set.theme.default_amplitude_cmap
+        if cmap is None:
+            cmap = default
+        elif isinstance(cmap, str):
+            cmap = self.set.theme.parse_cmap_name(cmap)
+        return cmap
+
+    def _parse_field_data(self, 
+                          V: np.ndarray, 
+                          value_scale: Literal['lin','log','symlog'], 
+                          symmetrize: bool, 
+                          clim: tuple[float, float] | None = None,
+                          clim_crop_factor: float = 1.0) -> tuple[tuple[float, float], str, Callable]:
+        """Does common processing operations amongst plot functions
+        including:
+         - Computing color limits
+         - Defining the default colormap
+         - Defining the quantity transformation T: R -> R
+
+        Args:
+            V (np.ndarray): _description_
+            symmetrize (bool): _description_
+
+        Returns:
+            tuple[np.ndarray, str]: _description_
+        """
+
+        # Sanitize and flatten
+        Vf = np.nan_to_num(V.flatten())
+
+        default_cmap = self.set.theme.default_amplitude_cmap
+
+        if value_scale == "log":
+            T = lambda x: np.log10(np.abs(x + 1e-12))
+        elif value_scale == "symlog":
+            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
+        else:
+            T = lambda x: x
+
+        # Extract min and max of the raw data, scaled by the crop factor
+        Vr = Vf.real
+        if symmetrize:
+            level = np.max(np.abs(Vr)) * clim_crop_factor
+            vmin, vmax = (-level, level)
+            default_cmap = self.set.theme.default_wave_cmap
+        else:
+            vmin, vmax = nanminmax(Vr)
+            vmin = vmin * clim_crop_factor
+            vmax = vmax * clim_crop_factor
+
+        # The plotted data is T(V), so the limits must be expressed in T-space as well
+        if value_scale == "log":
+            # log|V| is defined on the magnitude; the crop factor only moves the top of the range
+            Va = np.abs(Vr)
+            vmin, vmax = T(np.min(Va)), T(np.max(Va) * clim_crop_factor)
+        elif value_scale == "symlog":
+            vmin, vmax = T(vmin), T(vmax)
+
+        if clim is None:
+            if self._cbar.clim is not None:
+                clim = self._cbar.clim
+                vmin, vmax = clim
+            else:
+                clim = (vmin, vmax)
+
+        return clim, default_cmap, T
 
     def _get_path(self, filename: str) -> str:
         """Generates a filename for the EMerge package directory in the PyVista folder
@@ -701,6 +1232,7 @@ class EMergeDisplay:
                 bounds[5] + ds,
             )
             pv.global_theme.font.fmt = "%.3f"
+            pv.global_theme.font.family = self.set.theme.text_font
             actor = self._plot.show_grid(
                 bounds=bounds, color=self.set.theme.text_color, fmt="%.3f"
             )
@@ -710,7 +1242,13 @@ class EMergeDisplay:
         pv.global_theme.colorbar_horizontal.width = 0.4
         pv.global_theme.colorbar_vertical.height = 0.15
 
-        if self.set.theme.aa_active:
+        if self.set.theme.render_dither:
+            # Anti-aliasing would blend the black and white dots into grey
+            self._plot.disable_anti_aliasing()
+            for actor in self._plot.renderer.actors.values():
+                if isinstance(actor, pv.Actor):
+                    apply_dither(actor, self.set.theme.dither_cell, self.set.theme.dither_levels)
+        elif self.set.theme.aa_active:
             self._plot.enable_anti_aliasing(
                 self.set.theme.aa_mode, multi_samples=self.set.theme.aa_samples
             )
@@ -733,14 +1271,15 @@ class EMergeDisplay:
         self._stop = False
         self._objs = []
         self._animate_next = False
-        self._data_sets = []
+        self._orbit = None
+        self._items = []
+        self._current_item = None
         self._bwdrawing = False
-        self._reset_cbar()
+        self._cbar = _CbarSpec()
         self.set.theme.line_cycler.reset()
         self._plot.off_screen = False
         self._cycle_pos: int = 0
-        self._obj_cycler: list[str] = []
-        self._selectable_objects: dict[str:dict] = dict()
+        self._obj_cycler: list[_PlotItem] = []
         pv.OFF_SCREEN = False
 
     def _close_callback(self, arg):
@@ -770,11 +1309,7 @@ class EMergeDisplay:
             now = time.perf_counter()
             if now >= next_tick:
                 step = (step + 1) % steps
-                phi = np.exp(1j * (step / steps) * 2 * np.pi)
-
-                # update all animated objects
-                for aobj in self._objs:
-                    aobj.update(phi)
+                self._advance_frame(step, steps)
 
                 # draw one frame
                 self._plot.render()
@@ -788,6 +1323,108 @@ class EMergeDisplay:
             time.sleep(0.001)
         # ensure cleanup pathway runs once
         self._close_callback(None)
+
+    def _advance_frame(self, step: int, steps: int) -> None:
+        """Advances the field animation phase and the camera orbit by one frame."""
+        if self._objs:
+            phi = np.exp(1j * (step / steps) * 2 * np.pi)
+            for aobj in self._objs:
+                aobj.update(phi)
+
+        if self._orbit is not None:
+            self._rotate_camera(360.0 / self._orbit["n_frames"], self._orbit["axis"])
+
+    def _rotate_camera(self, angle_deg: float, axis: np.ndarray) -> None:
+        """Rotates the camera position and up-vector around an axis through the focal point."""
+        cam = self._plot.camera
+        k = axis / np.linalg.norm(axis)
+        a = np.deg2rad(angle_deg)
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        R = np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+
+        fp = np.array(cam.focal_point)
+        cam.position = tuple(fp + R @ (np.array(cam.position) - fp))
+        cam.up = tuple(R @ np.array(cam.up))
+        self._plot.reset_camera_clipping_range()
+
+    def _record(self, filename: str) -> None:
+        """Renders the orbit off-screen and writes every frame to a GIF or movie file."""
+        self._plot.off_screen = True
+        pv.OFF_SCREEN = True
+
+        # Video encoders work on 16x16 pixel blocks; other sizes get rescaled (and blurred)
+        width, height = self._orbit["window_size"]
+        self._plot.window_size = [16 * round(width / 16), 16 * round(height / 16)]
+
+        fps = self._orbit["fps"]
+        try:
+            if Path(filename).suffix.lower() == ".gif":
+                self._plot.open_gif(filename, fps=fps)
+            else:
+                self._plot.open_movie(filename, framerate=fps, quality=self._orbit["quality"])
+        except ImportError as e:
+            raise ImportError(
+                "Recording requires imageio (GIF) and imageio-ffmpeg (MP4): "
+                "pip install emsutil[record]"
+            ) from e
+
+        steps = max(1, int(self._Nsteps))
+        total = self._orbit["n_frames"] * self._orbit["loops"]
+        for frame in range(total):
+            self._advance_frame((frame + 1) % steps, steps)
+            self._plot.write_frame()
+
+        self._plot.mwriter.close()
+        self._plot.mwriter = None
+        logger.info(f"Saved orbit recording to {filename}")
+
+    def orbit(
+        self,
+        n_frames: int = 180,
+        fps: int = 30,
+        axis: Literal["x", "y", "z"] | tuple[float, float, float] = "z",
+        record: str | None = None,
+        loops: int = 1,
+        window_size: tuple[int, int] = (1920, 1088),
+        quality: int = 10,
+    ) -> EMergeDisplay:
+        """Makes the camera orbit around the geometry when the display is shown.
+
+        Can be combined with animate() so the field animates while the camera orbits.
+        This method can be method chained.
+
+        Args:
+            n_frames (int, optional): Frames per full 360° revolution. Defaults to 180.
+            fps (int, optional): Frames per second. Defaults to 30.
+            axis (Literal["x","y","z"] | tuple, optional): The world axis to orbit around. Defaults to "z".
+            record (str | None, optional): If given, renders off-screen and saves the orbit to this file
+                (.gif, or a movie format such as .mp4) instead of opening a window. Defaults to None.
+            loops (int, optional): Number of revolutions to record. Defaults to 1.
+            window_size (tuple[int, int], optional): Recording resolution in pixels (width, height), rounded
+                to multiples of 16. Defaults to (1920, 1088).
+            quality (int, optional): Movie encoding quality from 0 to 10 (ignored for GIF). Defaults to 10.
+
+        Returns:
+            EMergeDisplay: The same EMergeDisplay object
+
+        Example:
+        >>> display.orbit(record="orbit.mp4").add_field(...)
+        >>> display.show()
+        """
+        if isinstance(axis, str):
+            axis = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis]
+
+        self._orbit = dict(
+            n_frames=max(1, int(n_frames)),
+            fps=fps,
+            axis=np.array(axis, dtype=float),
+            record=record,
+            loops=max(1, int(loops)),
+            window_size=window_size,
+            quality=min(max(int(quality), 0), 10),
+        )
+        self._fps = fps
+        return self
 
     def _get_fieldname(self) -> str:
         """
@@ -845,9 +1482,28 @@ class EMergeDisplay:
         return pv.UnstructuredGrid(cells, celltypes, points)
 
     def _add_selectable(self, mesh: pv.UnstructuredGrid, actor: pv.Actor, name: str):
-        """Add a mesh and actor as selectable item."""
-        self._selectable_objects[name] = dict(mesh=mesh, actor=actor)
+        """Makes the plot item of actor selectable under name, picked by ray tracing mesh."""
+        item = self._current_item
+        if item is None:
+            item = next(
+                (it for it in self._items if _address(actor) in map(_address, it.props)),
+                None,
+            )
+        if item is None:
+            item = _PlotItem([actor])
+            self._items.append(item)
+        item.name, item.mesh, item.actor = name, mesh, actor
 
+    def _clear_highlight_text(self) -> None:
+        if self.highlight_text_actor is not None:
+            self._plot.remove_actor(self.highlight_text_actor)
+            self.highlight_text_actor = None
+
+    def _set_highlight_text(self, text: str) -> None:
+        self._clear_highlight_text()
+        self.highlight_text_actor = self.add_text(text, abs_position=(0.5,0.85,0), center=True)
+
+    @plot_item
     def _add_obj(
         self,
         mesh_obj: pv.UnstructuredGrid,
@@ -870,7 +1526,7 @@ class EMergeDisplay:
     ) -> pv.Actor:
 
         style = self.set.theme.render_style
-        color = self.set.theme.parse_color_name(color)
+        color = self.set.theme.parse_color(color)
         opacity = self.set.theme.parse_opacity(opacity)
 
         # Default rendering settings
@@ -916,33 +1572,43 @@ class EMergeDisplay:
         opacity = max(self.set.theme.render_min_opacity, opacity)
 
         # Defining the default keyword arguments for PyVista
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            color=color,
-            opacity=opacity,
-            metallic=metallic,
-            pbr=pbr,
-            roughness=roughness,
-            line_width=line_width,
-            edge_color=edge_color,
-            show_edges=show_edges,
-            pickable=False,
-            smooth_shading=smooth_shading,
-            split_sharp_edges=True,
-            specular=specular,
-            ambient=ambient,
-            diffuse=diffuse,
-            style=style,
+            dict(
+                color=color,
+                opacity=opacity,
+                metallic=metallic,
+                pbr=pbr,
+                roughness=roughness,
+                line_width=line_width,
+                edge_color=edge_color,
+                show_edges=show_edges,
+                pickable=False,
+                smooth_shading=smooth_shading,
+                split_sharp_edges=True,
+                specular=specular,
+                ambient=ambient,
+                diffuse=diffuse,
+                style=style,
+            )
         )
 
         # Treat as black and white
+        silhouette = None
         if not self._colorize:
             kwargs["pbr"] = False
             kwargs["roughness"] = 0.0
             kwargs["metallic"] = 0.0
             kwargs["opacity"] = 0.0
             kwargs["color"] = (1, 1, 1)
-            kwargs["silhouette"] = dict(color="black", line_width=3.0)
+            silhouette = dict(color="black", line_width=3.0)
+        elif self.set.theme.render_silhouette:
+            # Outline plus sharp edges; the outline follows the camera
+            silhouette = dict(
+                color=self.set.theme.geo_edge_color,
+                line_width=self.set.theme.geo_edge_width,
+                feature_angle=self.set.theme.silhouette_angle,
+            )
 
         # Add a texture if it is specified
         if texture is not None and texture != "None":
@@ -976,6 +1642,9 @@ class EMergeDisplay:
             kwargs2["ambient"] = 0.6
             kwargs2["opacity"] = opacity
             kwargs2["render_lines_as_tubes"] = False
+            # Pyvista names actors after their dataset by default and replaces actors
+            # with the same name, which would remove this overlay in the next call.
+            kwargs2["name"] = f"{type(mesh_obj).__name__}({mesh_obj.memory_address})-edges"
 
             kwargs["show_edges"] = False
 
@@ -984,11 +1653,27 @@ class EMergeDisplay:
         # Finally plot the mesh object.
         actor = self._wrap_plot(mesh_obj, *args, **kwargs)
 
-        # Push 3D Geometries back to avoid Z-fighting with 2D geometries.
-        if obj_dim == 3:
+        # The silhouette filter uses the point order of each face to tell front from back.
+        # Meshes with mixed face orientation (common in FEM meshes) would get false edges
+        # between oppositely oriented faces, so it is fed a consistently oriented surface.
+        if silhouette is not None and not plot_mesh:
+            surface = mesh_obj.extract_surface()
+            if surface.n_cells > 0:
+                if surface.faces.size > 0:
+                    surface = surface.compute_normals(
+                        consistent_normals=True, cell_normals=True, point_normals=False
+                    )
+                self._plot.add_silhouette(surface, **silhouette)
+
+        # Avoid Z-fighting by layering coincident surfaces in depth, front to back:
+        # edge/silhouette lines (VTK default line offset), fields, 2D geometry, 3D geometry.
+        # Each layer is one (factor, units) step of (1, 0.5) behind the one in front.
+        if obj_dim in (2, 3):
             mapper = actor.GetMapper()
-            mapper.SetResolveCoincidentTopology(1)
-            mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1, 0.5)
+            # Note: the resolve mode is a global VTK setting, the offset parameters are per mapper.
+            mapper.SetResolveCoincidentTopologyToPolygonOffset()
+            layer = obj_dim - 1
+            mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(1.0 * layer, 0.5 * layer)
 
         return actor
 
@@ -1021,6 +1706,7 @@ class EMergeDisplay:
             logger.debug(f"Saved VTK object to {filename}.")
         logger.info("VTK saving complete!")
 
+    @plot_item
     def add_scatter(self, xs: np.ndarray, ys: np.ndarray, zs: np.ndarray):
         """Adds a scatter point cloud
 
@@ -1030,9 +1716,9 @@ class EMergeDisplay:
             zs (np.ndarray): The Z-coordinate
         """
         cloud = pv.PolyData(np.array([xs, ys, zs]).T)
-        self._data_sets.append(cloud)
         self._plot.add_points(cloud)
 
+    @plot_item
     def add_field(
         self,
         field: FieldPlotData,
@@ -1041,9 +1727,13 @@ class EMergeDisplay:
         clim: tuple[float, float] | None = None,
         opacity: float = None,
         voltype: Literal["cloud", "contour", "clip"] = "cloud",
+        vector_type: Literal["vector", "cloud"] = "vector",
         clim_crop_factor: float = 1.0,
         symmetrize: bool = False,
+        quiver_scale: float = 1.0,
+        resample_npts: int = 50,
         _fieldname: str | None = None,
+        smooth_shading: bool = False,
         **kwargs,
     ) -> pv.DataSet:
         """A generic method to add a field plot to the display. Depending on the field type, it will call the appropriate method.
@@ -1061,34 +1751,88 @@ class EMergeDisplay:
             clipplane (bool, optional): If a 3D grid plot should be done including a clip plane. Defaults to false.
             clim_crop_factor (float, optional): A multiplier for the default clim limits. If this value is 0.5, the clim limits will be divided by half to zoom in on the color range.
             symmetrize (bool, optional): If the colorscale should be symmetrized. Defaults to False.
+            vector_type (Literal["vector","cloud"], optional): How 3D vector fields are drawn: 'vector' as arrows,
+                'cloud' as a volume where colour shows the direction and opacity the magnitude (see add_vector_cloud,
+                whose color_mapping and vivid options can be passed as keyword arguments). Defaults to 'vector'.
+            resample_npts (int, optional): Grid points along the largest axis when resampling unstructured scalar data onto a regular grid. Defaults to 50.
             _fieldname (str | None, optional): A name for the field. Defaults to None.
 
         Returns:
             pv.DataSet: _description_
         """
 
-        if "title" not in self._cbar_args:
-            self._cbar_args["title"] = field.name
+        if self._cbar.title is None:
+            self._cbar.title = field.name
 
-        smooth_shading = False
         if self._do_animate:
             smooth_shading = False
 
         if field.structure == DataStructure.TRISURF:
-            self.add_trisurf(
+            if field._is_quiver:
+                if vector_type == "cloud":
+                    raise ValueError(
+                        "vector_type='cloud' needs volumetric data, surface fields can only use vector_type='vector'."
+                    )
+                self.add_quiver(
+                    field.x,
+                    field.y,
+                    field.z,
+                    field.vx,
+                    field.vy,
+                    field.vz,
+                    scale=quiver_scale,
+                    scalemode=scale,
+                    **kwargs,
+                )
+                return
+            else:
+                self.add_trisurf(
+                    field.x,
+                    field.y,
+                    field.z,
+                    field.F,
+                    field.tris,
+                    scale=scale,
+                    cmap=cmap,
+                    clim=clim,
+                    opacity=opacity,
+                    symmetrize=symmetrize,
+                    clim_crop_factor=clim_crop_factor,
+                    _fieldname=_fieldname,
+                    smooth_shading=smooth_shading,
+                    **kwargs,
+                )
+                return
+        if field._is_quiver and vector_type == "cloud":
+            if field.structure == DataStructure.UNSTRUCTURED:
+                # The resampler interpolates the three components of a magnitude proxy
+                proxy = FieldPlotData(
+                    x=field.x, y=field.y, z=field.z,
+                    F=VectorFieldMagnitudeProxy(field.vx, field.vy, field.vz),
+                    structure=DataStructure.UNSTRUCTURED, name=field.name,
+                )
+                proxy = _resample_unstructured(proxy, resample_npts)
+                field = FieldPlotData(
+                    x=proxy.x, y=proxy.y, z=proxy.z,
+                    vx=proxy.F.x, vy=proxy.F.y, vz=proxy.F.z,
+                    structure=proxy.structure, name=field.name,
+                )
+            if field.structure != DataStructure.GRID3D:
+                raise ValueError(
+                    f"vector_type='cloud' needs volumetric data, got {field.structure}. Use vector_type='vector' instead."
+                )
+            self.add_vector_cloud(
                 field.x,
                 field.y,
                 field.z,
-                field.F,
-                field.tris,
-                scale=scale,
-                cmap=cmap,
+                field.vx,
+                field.vy,
+                field.vz,
+                scale="log" if scale == "log" else "lin",
                 clim=clim,
-                opacity=opacity,
-                symmetrize=symmetrize,
                 clim_crop_factor=clim_crop_factor,
+                opacity=opacity,
                 _fieldname=_fieldname,
-                smooth_shading=smooth_shading,
                 **kwargs,
             )
             return
@@ -1100,10 +1844,13 @@ class EMergeDisplay:
                 field.vx,
                 field.vy,
                 field.vz,
+                scale=quiver_scale,
                 scalemode=scale,
                 **kwargs,
             )
             return
+        if field.structure == DataStructure.UNSTRUCTURED:
+            field = _resample_unstructured(field, resample_npts)
         if field.structure == DataStructure.GRID2D:
             self.add_surf(
                 field.x,
@@ -1172,6 +1919,7 @@ class EMergeDisplay:
             f"I have no clue how to plot dataset {field} with structure {field.structure}"
         )
 
+    @plot_item
     def add_surf(
         self,
         x: np.ndarray,
@@ -1203,18 +1951,17 @@ class EMergeDisplay:
 
         (¹): lin: f(x)=x, log: f(x)=log₁₀(|x|), symlog: f(x)=sgn(x)·log₁₀(1+|x·ln(10)|)
         """
+
+        clim, default_cmap, T = self._parse_field_data(field, scale, symmetrize, clim, clim_crop_factor)
+
         # Extract the fieldname
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
+        name = self._get_fieldname() if _fieldname is None else _fieldname
 
         # Create the structured grid objects
         grid = pv.StructuredGrid(x, y, z)
         field_flat = field.flatten(order="F")
 
         # Generate and transform the dataset
-        T = get_transformation(scale)
         static_field = T(np.real(field_flat))
 
         # Set the scalar field as grid and apply a NaN removal
@@ -1222,49 +1969,25 @@ class EMergeDisplay:
         grid[name] = static_field
         grid_no_nan = grid.threshold(scalars=name, all_scalars=True)
 
-        # Get the default colormap
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        # Determine color limits
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-            else:
-                fmin = np.nanmin(static_field) * clim_crop_factor
-                fmax = np.nanmax(static_field) * clim_crop_factor
-                clim = (fmin, fmax)
-
-        # Make the color limit symmetrical and pick the
-        # default symmetrical colormap
-        if symmetrize:
-            lim = max(abs(clim[0]), abs(clim[1]))
-            clim = (-lim, lim)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        # If no cmap is provided, pick the default.
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        cmap = self._parse_cmap_name(cmap, default=default_cmap)
 
         # Set default plot argument settings
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            cmap=cmap,
-            clim=clim,
-            opacity=self.parse_opacity(opacity, "EMERGE-SURF"),
-            pickable=False,
-            multi_colors=True,
+            self.set.theme.surf_kwargs,
+            dict(
+                cmap=cmap,
+                clim=clim,
+                opacity=self.parse_opacity(opacity, "EMERGE-SURF"),
+                pickable=False,
+                multi_colors=True,
+            )
         )
-        kwargs = self._awd(kwargs, self.set.theme.surf_kwargs)
 
         # Overwrite the color bar Title if no title exists
-        self._cbar_defaults(title=name)
-
         # Generate the plot
-        actor = self._wrap_plot(
-            grid_no_nan, scalars=name, scalar_bar_args=self._cbar_args, **kwargs
-        )
+        actor = self._wrap_plot(grid_no_nan, scalars=name, **kwargs)
+        self._add_scalar_bar(actor, name)
 
         # Animation settings
         if self._animate_next:
@@ -1280,9 +2003,9 @@ class EMergeDisplay:
                 _AnimObject(field_flat, T, grid, grid_no_nan, actor, on_update)
             )
             self._animate_next = False
-        self._reset_cbar()
         return grid_no_nan
 
+    @plot_item
     def add_trisurf(
         self,
         x: np.ndarray,
@@ -1322,64 +2045,35 @@ class EMergeDisplay:
         (¹): lin: f(x)=x, log: f(x)=log₁₀(|x|), symlog: f(x)=sgn(x)·log₁₀(1+|x·ln(10)|)
         """
 
+        clim, default_cmap, T = self._parse_field_data(field, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+
         grid = self._mesh_manual(np.array([x, y, z]), tris)
-
         field_flat = field.flatten(order="F")
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
         static_field = T(np.real(field_flat))
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
         grid[name] = static_field
 
-        default_cmap = self.set.theme.default_amplitude_cmap
-        # Determine color limits
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-            else:
-                fmin = np.nanmin(static_field) * clim_crop_factor
-                fmax = np.nanmax(static_field) * clim_crop_factor
-                clim = (fmin, fmax)
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        if symmetrize:
-            lim = max(abs(clim[0]), abs(clim[1]))
-            clim = (-lim, lim)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
-
-        kwargs = setdefault(
+        kwargs = self._append_with_defaults(
             kwargs,
-            cmap=cmap,
-            clim=clim,
-            opacity=opacity,
-            pickable=False,
-            multi_colors=True,
+            self.set.theme.surf_kwargs,
+            dict(
+                cmap=cmap,
+                clim=clim,
+                opacity=opacity,
+                pickable=False,
+                multi_colors=True,
+            )
         )
-        self._awd(kwargs, self.set.theme.surf_kwargs)
 
-        self._cbar_defaults(title=name)
         actor = self._wrap_plot(
             grid,
             scalars=name,
-            scalar_bar_args=self._cbar_args,
             backface_culling=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
         if self._animate_next:
 
@@ -1390,7 +2084,6 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field_flat, T, grid, grid, actor, on_update))
             self._animate_next = False
-        self._reset_cbar()
 
     def add_title(self, title: str, color: str = "EMERGE-TEXT") -> None:
         """Adds a title to the plot
@@ -1419,6 +2112,7 @@ class EMergeDisplay:
             "right_edge",
             "left_edge",
         ] = "upper_right",
+        center: bool = False,
         abs_position: tuple[float, float, float] | None = None,
     ):
         """Adds text to the plot at a given position
@@ -1448,8 +2142,13 @@ class EMergeDisplay:
             viewport=viewport,
             **kwargs,
         )
+        if center:
+            prop = actor.GetTextProperty()
+            prop.SetJustificationToCentered()
+            prop.SetVerticalJustificationToCentered()
         return actor
 
+    @plot_item
     def add_quiver(
         self,
         x: np.ndarray,
@@ -1464,67 +2163,77 @@ class EMergeDisplay:
         scalemode: Literal["lin", "log"] = "lin",
         _fieldname: str = "",
     ):
-        """Add a quiver plot to the display
-
-        Args:
-            x (np.ndarray): The X-coordinates
-            y (np.ndarray): The Y-coordinates
-            z (np.ndarray): The Z-coordinates
-            dx (np.ndarray): The arrow X-magnitude
-            dy (np.ndarray): The arrow Y-magnitude
-            dz (np.ndarray): The arrow Z-magnitude
-            scale (float, optional): The arrow scale. Defaults to 1.
-            scalemode (Literal['lin','log'], optional): Wether to scale lin or log. Defaults to 'lin'.
-        """
         x = x.flatten()
         y = y.flatten()
         z = z.flatten()
-        dx = dx.flatten().real
-        dy = dy.flatten().real
-        dz = dz.flatten().real
+        # Keep the complex components alive for animation; only take .real
+        # once we've decided which frame's instantaneous value we want.
+        dx_c = dx.flatten()
+        dy_c = dy.flatten()
+        dz_c = dz.flatten()
 
-        ids = np.invert(np.isnan(dx))
+        ids = np.invert(np.isnan(dx_c.real))
+        
+        x, y, z = x[ids], y[ids], z[ids]
+        dx_c, dy_c, dz_c = dx_c[ids], dy_c[ids], dz_c[ids]
 
-        if cmap is None:
-            cmap = self.set.theme.default_amplitude_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        dmin = _mean_distance(x, y, z)
 
-        x, y, z, dx, dy, dz = x[ids], y[ids], z[ids], dx[ids], dy[ids], dz[ids]
-        if scalemode == "log":
-            dx, dy, dz = _logscale(dx, dy, dz)
+        def build_vectors(dxr, dyr, dzr):
+            """Turns instantaneous real component arrays into scaled arrow vectors."""
+            dxr, dyr, dzr = dxr.copy(), dyr.copy(), dzr.copy()
+            if scalemode == "log":
+                dxr, dyr, dzr = _logscale(dxr, dyr, dzr)
+            dmax = np.max(_norm(dxr, dyr, dzr))
+            dmax = dmax if dmax != 0 else 1e-30
+            return scale * np.array([dxr, dyr, dzr]) / dmax * dmin * 2
 
-        dmin = _min_distance(x, y, z)
-        dmax = np.max(_norm(dx, dy, dz))
-
-        Vec = scale * np.array([dx, dy, dz]) / dmax * dmin * 2
+        Vec = build_vectors(dx_c.real, dy_c.real, dz_c.real)
 
         kwargs = dict()
 
+        # Turn Scalar bars off if a uniform color was supplied. Unique to Add Quiver.
         if color is not None:
             kwargs["color"] = self.set.theme.parse_color_name(color)
-            kwargs["show_scalar_bar"] = False
 
-        self._cbar_defaults(title=_fieldname)
+        cmap = self._parse_cmap_name(cmap)
 
         arrow_obj = pv.Arrow(**self.set.theme.quiver_kwargs)
         grid = pv.StructuredGrid(x, y, z)
         grid.point_data["vectors"] = np.column_stack(Vec)
         grid.set_active_vectors("vectors")
-        arrows = grid.glyph(
-            orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5
-        )
+        arrows = grid.glyph(orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5)
 
-        pl = self._wrap_plot(
+        actor = self._wrap_plot(
             arrows,
             clim=None,
             cmap=cmap,
-            scalar_bar_args=self._cbar_args,
             **kwargs,
         )
-        self._data_sets.append(pl.mapper.dataset)
-        self._reset_cbar()
+        if color is None:
+            self._add_scalar_bar(actor, _fieldname)
 
+
+        if self._animate_next:
+
+            def on_update(obj: _AnimObject, phi: complex):
+                dxr = (dx_c * phi).real
+                dyr = (dy_c * phi).real
+                dzr = (dz_c * phi).real
+                Vec_t = build_vectors(dxr, dyr, dzr)
+                obj.grid.point_data["vectors"] = np.column_stack(Vec_t)
+                obj.grid.set_active_vectors("vectors")
+                new_arrows = obj.grid.glyph(
+                    orient="vectors", scale="vectors", geom=arrow_obj, factor=0.5
+                )
+                obj.actor.GetMapper().SetInputData(new_arrows)
+                obj.actor.GetMapper().Modified()
+
+            # field slot is unused here (T slot too) — kept only to match _AnimObject's signature
+            self._objs.append(_AnimObject(None, None, grid, None, actor, on_update))
+            self._animate_next = False
+
+    @plot_item
     def add_clip_volume(
         self,
         X: np.ndarray,
@@ -1550,60 +2259,32 @@ class EMergeDisplay:
             symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
-        Vf = V.flatten()
-        Vf = np.nan_to_num(Vf)
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
+
         
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if symmetrize:
-            level = np.max(np.abs(Vf))
-            vmin, vmax = (-level, level)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
         grid[name] = T(np.real(field))
-        kwargs = self.set.theme.surf_kwargs
 
-        self._plot.add_mesh_clip_plane(
+        kwargs = self._append_with_defaults(dict(), self.set.theme.surf_kwargs)
+
+        actor = self._plot.add_mesh_clip_plane(
             grid,
             opacity=opacity,
             cmap=cmap,
             clim=clim,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
+            show_scalar_bar=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
-        self._reset_cbar()
 
+    @plot_item
     def add_contour(
         self,
         X: np.ndarray,
@@ -1630,50 +2311,15 @@ class EMergeDisplay:
             symmetrize (bool, optional): Wether to symmetrize the countour levels (-V,V). Defaults to True.
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
-        Vf = V.flatten()
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
-
-        Vf = np.nan_to_num(Vf)
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if symmetrize:
-            level = np.max(np.abs(T(Vf)))
-            vmin, vmax = (-level, level)
-            default_cmap = self.set.theme.default_wave_cmap
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
         grid = pv.StructuredGrid(X, Y, Z)
         field = V.flatten(order="F")
         grid[name] = T(np.real(field))
 
-        self._cbar_defaults(title=name)
-        levels = list(np.linspace(vmin, vmax, Nlevels))
+        levels = list(np.linspace(clim[0], clim[1], Nlevels))
         contour = grid.contour(isosurfaces=levels)
 
         kwargs = self.set.theme.contour_kwargs
@@ -1684,9 +2330,9 @@ class EMergeDisplay:
             cmap=cmap,
             clim=clim,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
         if self._animate_next:
 
@@ -1698,8 +2344,8 @@ class EMergeDisplay:
 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
-        self._reset_cbar()
 
+    @plot_item
     def add_cloud(
         self,
         X: np.ndarray,
@@ -1725,51 +2371,21 @@ class EMergeDisplay:
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
 
-        Vf = V.flatten()
-        vmin, vmax = nanminmax(Vf.real)
-        vmin = vmin * clim_crop_factor
-        vmax = vmax * clim_crop_factor
+        clim, default_cmap, T = self._parse_field_data(V, scale, symmetrize, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        Vf = np.nan_to_num(Vf)
-
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
+        # Create opacity scales
         if opacity is None:
             if symmetrize:
-                level = np.max(np.abs(T(Vf))) * clim_crop_factor
-                vmin, vmax = (-level, level)
-                default_cmap = self.set.theme.default_wave_cmap
-                opacity_array = 256 * np.abs(
+                opacity_array = 255 * np.abs(
                     1 - np.cos(np.linspace(-np.pi / 2, np.pi / 2, 256))
-                )  # np.abs(np.linspace(-256.0, 256.0, 256))
+                )**0.85
             else:
-                opacity_array = np.linspace(0, 256, 256)
+                # Peak at 255: pyvista stores the curve as uint8, so 256 would wrap to fully transparent
+                opacity_array = 255 * np.linspace(0, 1, 256)**2
         else:
             opacity_array = opacity
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
 
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
         y_coords = Y[:, 0, 0]  # Y varies along second axis
@@ -1784,13 +2400,16 @@ class EMergeDisplay:
             ),
             origin=(x_coords[0], y_coords[0], z_coords[0]),
         )
+        
         V = np.nan_to_num(V, nan=0.0)
         field = V.transpose(1, 0, 2).flatten(order="F")
-        grid[name] = T(np.real(field))
+        # Clip to clim: values outside it already render with the end colour, but VTK samples the
+        # transfer function over the full data range, which can exceed the GPU's maximum texture size
+        grid[name] = np.clip(T(np.real(field)), *clim)
 
-        self._cbar_defaults(title=name)
         kwargs = self.set.theme.cloud_kwargs
 
+        # Add to the plot
         actor = self._plot.add_volume(
             grid,
             scalars=name,
@@ -1798,24 +2417,167 @@ class EMergeDisplay:
             clim=clim,
             cmap=cmap,
             pickable=False,
-            scalar_bar_args=self._cbar_args,
+            show_scalar_bar=False,
             **kwargs,
         )
+        self._add_scalar_bar(actor, name)
         actor.prop.interpolation_type = "linear"
 
         if self._animate_next:
 
             def on_update(obj: _AnimObject, phi: complex):
                 field_anim = obj.T(np.real(obj.field * phi))
-                obj.grid[name] = field_anim
+                obj.grid[name] = np.clip(field_anim, *clim)
                 obj.actor.GetMapper().SetInputData(obj.grid)
                 obj.actor.GetMapper().Modified()
                 obj.actor.Modified()
 
             self._objs.append(_AnimObject(field, T, grid, None, actor, on_update))  # type: ignore
             self._animate_next = False
-        self._reset_cbar()
 
+    @plot_item
+    def add_vector_cloud(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        Z: np.ndarray,
+        vx: np.ndarray,
+        vy: np.ndarray,
+        vz: np.ndarray,
+        color_mapping: tuple[str, str, str] = ("r", "g", "b"),
+        vivid: bool = True,
+        color_gamma: float = 0.5,
+        scale: Literal["lin", "log"] = "lin",
+        clim: tuple[float, float] | None = None,
+        clim_crop_factor: float = 1.0,
+        log_range_db: float = 40.0,
+        opacity: np.ndarray | None = None,
+        _fieldname: str | None = None,
+    ):
+        """Adds a 3D volumetric cloud of a vector field where the colour shows the direction axis
+        and the opacity the magnitude.
+
+        Each colour channel is the absolute value of one direction component, so a direction and
+        its opposite share a colour: with the default mapping x is red, y green and z blue, and
+        in-between directions mix. Field rotation therefore shows as a colour shift, while sign
+        flips over the phase do not change the colour. Zero magnitude is transparent, magnitudes
+        at or above the upper limit are opaque. By default the upper limit is the 99th percentile
+        of |F|, so a few singular points (metal edges, ports) do not make the rest invisible.
+
+        Args:
+            X (np.ndarray): A 3D Grid of X-values
+            Y (np.ndarray): A 3D Grid of Y-values
+            Z (np.ndarray): A 3D Grid of Z-values
+            vx (np.ndarray): The X-component of the vector field (may be complex)
+            vy (np.ndarray): The Y-component of the vector field (may be complex)
+            vz (np.ndarray): The Z-component of the vector field (may be complex)
+            color_mapping (tuple[str, str, str], optional): The colour for the x, y and z axis, from
+                r, g, b (red, green, blue) and c, m, y (cyan, magenta, yellow), e.g. ("c", "m", "y").
+                The three colours must be independent: none can be a mix of the other two, so
+                ("r", "g", "y") is not allowed. Defaults to ("r", "g", "b").
+            vivid (bool, optional): Make every direction equally bright instead of dimming
+                in-between directions. Defaults to False.
+            color_gamma (float, optional): Balance between axis and in-between colours. 1 maps the
+                direction components directly, which makes axis colours dominate; lower values give
+                in-between colours more room. 0.8 spreads the hue almost evenly over the angle.
+                Defaults to 0.8.
+            scale (Literal["lin","log"], optional): Map |F| to opacity linearly or in dB. Defaults to 'lin'.
+            clim (tuple[float, float] | None, optional): The |F| range (min, max) mapped from transparent to opaque.
+                Defaults to None (automatic).
+            clim_crop_factor (float, optional): Multiplier on the automatic upper limit; below 1 makes weaker
+                fields more visible. Defaults to 1.0.
+            log_range_db (float, optional): Dynamic range shown with scale='log'. Defaults to 40 dB.
+            opacity (np.ndarray | None, optional): A 256 point opacity curve over the magnitude. Defaults to None.
+        """
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+
+        if opacity is None:
+            opacity_array = np.linspace(0, 255, 256)
+            if scale == "lin":
+                opacity_array = 255 * (opacity_array / 255) ** 2
+        else:
+            opacity_array = opacity
+
+        x_coords = X[0, :, 0]
+        y_coords = Y[:, 0, 0]
+        z_coords = Z[0, 0, :]
+
+        grid = pv.ImageData(
+            dimensions=(len(x_coords), len(y_coords), len(z_coords)),
+            spacing=(
+                x_coords[1] - x_coords[0],
+                y_coords[1] - y_coords[0],
+                z_coords[1] - z_coords[0],
+            ),
+            origin=(x_coords[0], y_coords[0], z_coords[0]),
+        )
+
+        # Same point ordering as add_cloud, components stacked as (N, 3)
+        field = np.column_stack(
+            [np.nan_to_num(np.asarray(v), nan=0.0).transpose(1, 0, 2).flatten(order="F") for v in (vx, vy, vz)]
+        )
+        # Full complex amplitude, so the opacity scale stays fixed during an animation
+        amplitude = np.linalg.norm(np.abs(field), axis=1)
+        if clim is None:
+            # 99th percentile instead of the maximum, so a few singular points (metal edges,
+            # ports) do not make the rest of the field nearly transparent
+            nonzero = amplitude[amplitude > 0]
+            vmax = float(np.percentile(nonzero, 99)) * clim_crop_factor if nonzero.size else 1.0
+            vmin = 0.0 if scale == "lin" else vmax * 10 ** (-log_range_db / 20)
+        else:
+            vmin, vmax = clim
+
+        if scale == "log":
+            vmin = max(vmin, vmax * 1e-12)
+            lmin, lmax = np.log10(vmin), np.log10(vmax)
+
+            def alpha_fn(m: np.ndarray) -> np.ndarray:
+                return (np.log10(np.maximum(m, 1e-300)) - lmin) / (lmax - lmin)
+        else:
+
+            def alpha_fn(m: np.ndarray) -> np.ndarray:
+                return (m - vmin) / (vmax - vmin)
+
+        # RGBA volumes use the alpha channel linearly, so the opacity curve is applied to alpha here
+        curve = np.clip(np.asarray(opacity_array, dtype=float), 0, 255)
+        curve_x = np.linspace(0, 255, len(curve))
+
+        def colorize(V: np.ndarray) -> np.ndarray:
+            rgba = _direction_rgba(V, alpha_fn, color_mapping, vivid, color_gamma)
+            rgba[:, 3] = np.round(np.interp(rgba[:, 3], curve_x, curve)).astype(np.uint8)
+            return rgba
+
+        grid[name] = colorize(np.real(field))
+
+        kwargs = self.set.theme.cloud_kwargs
+
+        actor = self._plot.add_volume(
+            grid,
+            scalars=name,
+            pickable=False,
+            **kwargs,
+        )
+        actor.prop.interpolation_type = "linear"
+
+        # Pyvista only sets the opacity unit distance of component 0, the others keep VTK's
+        # default of 1.0 world unit. RGBA volumes take opacity from component 3 (alpha), which
+        # would make them nearly transparent at mm scale.
+        unit_distance = actor.prop.GetScalarOpacityUnitDistance(0)
+        for component in range(1, 4):
+            actor.prop.SetScalarOpacityUnitDistance(component, unit_distance)
+
+        if self._animate_next:
+
+            def on_update(obj: _AnimObject, phi: complex):
+                obj.grid[name] = colorize(np.real(obj.field * phi))
+                obj.actor.GetMapper().SetInputData(obj.grid)
+                obj.actor.GetMapper().Modified()
+                obj.actor.Modified()
+
+            self._objs.append(_AnimObject(field, None, grid, None, actor, on_update))  # type: ignore
+            self._animate_next = False
+
+    @plot_item
     def add_streamline(
         self,
         X: np.ndarray,
@@ -1830,7 +2592,7 @@ class EMergeDisplay:
         clim_crop_factor: float = 1.0,
         cmap: cmap_names | None = None,
         opacity: float = 0.25,
-        _fieldname: str | None = None,
+        _fieldname: str | None = 'RTData',
     ):
         """Adds a 3D volumetric cloud volume plot based on a 3D grid of X,Y,Z and field values
 
@@ -1842,44 +2604,21 @@ class EMergeDisplay:
             cmap (str, optional): The color map. Defaults to 'viridis'.
         """
 
+        # Data Pre Processing
         vx = vx.flatten()
         vx = np.nan_to_num(vx)
         vy = vy.flatten()
         vy = np.nan_to_num(vy)
         vz = vz.flatten()
         vz = np.nan_to_num(vz)
-
         norm = (np.abs(vx) ** 2 + np.abs(vy) ** 2 + np.abs(vz) ** 2) ** 0.5
-        vmin = np.min(norm) * clim_crop_factor
-        vmax = np.max(norm) * clim_crop_factor
 
-        if _fieldname is None:
-            name = self._get_fieldname()
-        else:
-            name = _fieldname
-        name = "RTData"
+        # Creating defaults
+        clim, default_cmap, T = self._parse_field_data(norm, scale, False, clim, clim_crop_factor)
+        name = self._get_fieldname() if _fieldname is None else _fieldname
+        cmap = self._parse_cmap_name(cmap, default_cmap)
 
-        default_cmap = self.set.theme.default_amplitude_cmap
-
-        if scale == "log":
-            T = lambda x: np.log10(np.abs(x + 1e-12))
-        elif scale == "symlog":
-            T = lambda x: np.sign(x) * np.log10(1 + np.abs(x * np.log(10)))
-        else:
-            T = lambda x: x
-
-        if clim is None:
-            if self._cbar_lim is not None:
-                clim = self._cbar_lim
-                vmin, vmax = clim
-            else:
-                clim = (vmin, vmax)
-
-        if cmap is None:
-            cmap = default_cmap
-        elif isinstance(cmap, str):
-            cmap = self.set.theme.parse_cmap_name(cmap)
-
+        # Data processing for plotting
         x_coords = X[0, :, 0]  # Assuming X varies along first axis
         y_coords = Y[:, 0, 0]  # Y varies along second axis
         z_coords = Z[0, 0, :]  # Z varies along third axis
@@ -1912,23 +2651,23 @@ class EMergeDisplay:
         else:
             source_center = None
             source_radius = None
+            
         sl = grid.streamlines(
             "vectors",
             n_points=200,
             source_center=source_center,
             source_radius=source_radius,
         )
-        self._cbar_defaults(title=name)
         kwargs = self.set.theme.streamline_kwarg
 
         actor = self._wrap_plot(
             sl,
             cmap=cmap,
             pickable=False,
-            scalar_bar_args=self._cbar_args**kwargs,
+            **kwargs,
         )
+        self._add_scalar_bar(actor, name)
 
-        self._reset_cbar()
 
     def _add_aux_items(self) -> None:
         saved_camera = {
@@ -2286,7 +3025,7 @@ class ScreenSelector:
             actor = self.disp._plot.add_mesh(
                 grid,
                 opacity=0.001,
-                color="red",
+                color="blue",
                 pickable=True,
                 name=f"FaceTag_{grid._tag}",
             )
@@ -2294,29 +3033,10 @@ class ScreenSelector:
 
         def callback(actor: pv.Actor):
             key = int(actor.name.split("_")[1])
-            points = self.surfs[key]
-            xs = points[0, :]
-            ys = points[1, :]
-            zs = points[2, :]
-            meanx = np.mean(xs)
-            meany = np.mean(ys)
-            meanz = np.mean(zs)
-            data = (
-                meanx,
-                meany,
-                meanz,
-                min(xs),
-                min(ys),
-                min(zs),
-                max(xs),
-                max(ys),
-                max(zs),
-            )
-            encoded = self.encoder(data)  # type: ignore
-            print(f"Face code key={key}: ", encoded)
+            self.disp._set_highlight_text(self.disp._facetags.get(key, 'Unknown?'))
 
         self.disp._plot.enable_mesh_picking(
-            callback, style="surface", left_clicking=True, use_actor=True
+            callback, style="surface", color=self.disp.set.theme.parse_color_name('EMERGE-SELECT'), opacity=0.25, left_clicking=True, use_actor=True
         )
 
     def turn_off(self) -> None:
@@ -2334,14 +3054,14 @@ def _do_nothing(*args):
 
 
 class ScreenRuler:
-    def __init__(self, display: EMergeDisplay, min_length: float):
+    def __init__(self, display: EMergeDisplay):
         self.disp: EMergeDisplay = display
         self.points: list[tuple] = [(0, 0, 0), (0, 0, 0)]
         self.text: pv.Text | None = None
         self.ruler: Any = None
         self.state: bool = False
-        self.min_length: float = min_length
         self._call_coords: Callable = _do_nothing
+        self._snap_actor = None
 
     @freeze
     def toggle(self):
@@ -2352,15 +3072,62 @@ class ScreenRuler:
 
     @freeze
     def turn_on(self):
-        self.state = True
-        self.disp._plot.enable_point_picking(
-            self._add_point, left_clicking=True, tolerance=self.min_length
+        if self.state:
+            return
+
+        pl = self.disp._plot
+        points = ruler_snap_points(
+            (item.mesh, item.actor)
+            for item in self.disp._selectable_items
+            if item.actor.GetVisibility()
         )
+
+        if not len(points):
+            logger.info("No ruler snap points found.")
+            return
+
+        # Added outside of a plot item, so the snap cloud is not saved or exploded.
+        self._snap_actor = pl.add_mesh(
+            pv.PolyData(points),
+            name="_ruler_snap_points",
+            style="points",
+            color="orange",
+            point_size=12,
+            render_points_as_spheres=True,
+            lighting=False,
+            pickable=True,
+            reset_camera=False,
+        )
+
+        pl.enable_point_picking(
+            callback=self._add_point_callback,
+            picker="point",
+            left_clicking=True,
+            tolerance=0.01,
+            show_point=False,
+            show_message=False,
+            pickable_window=False,
+        )
+
+        # Only the snap cloud participates, even if other actors are pickable.
+        picker = pl.iren.picker
+        picker.InitializePickList()
+        picker.AddPickList(self._snap_actor)
+        picker.PickFromListOn()
+
+        self.state = True
+
 
     @freeze
     def turn_off(self):
+        pl = self.disp._plot
+        pl.disable_picking()
+
+        if self._snap_actor is not None:
+            pl.remove_actor(self._snap_actor, reset_camera=False)
+            self._snap_actor = None
+
         self.state = False
-        self.disp._plot.disable_picking()
 
     @property
     def dist(self) -> float:
@@ -2404,9 +3171,15 @@ class ScreenRuler:
             self._call_coords(x1, y1, x2, y2, z)
 
     @freeze
-    def _add_point(self, point: tuple[float, float, float]):
+    def _add_point_callback(self, point: tuple[float, float, float]):
         self.points = [point, self.points[0]]
         self.text = self.disp._plot.add_text(
-            self.measurement_string, position=self.middle, name="RulerText"
+            self.measurement_string, 
+            position=self.middle, 
+            name="RulerText",
         )
         self.set_ruler()
+
+        color = pv.Color(self.disp.set.theme.text_color).float_rgb
+        self.ruler.GetTitleTextProperty().SetColor(*color)
+        self.ruler.GetLabelTextProperty().SetColor(*color)
