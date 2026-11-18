@@ -447,6 +447,8 @@ class EHFieldFF(Saveable):
     Ptot: float
     ang: np.ndarray | None = field(default=None)
     freq: float | None = field(default=None)
+    # [Written by Claude] The power incident on the ports of the excitation (W), the reference of the gain
+    Pinc: float = field(default=1.0)
 
     def total_radiated_power_integral(
         self,
@@ -571,10 +573,12 @@ class EHFieldFF(Saveable):
 
     @property
     def gain(self, kind: Literal["iso", "omni"] = "iso") -> FarFieldComponent:
+        # [Written by Claude] Realized gain: relative to the incident power, so it does not scale with the port power
+        scale = (getattr(self, "Pinc", None) or 1.0) ** 0.5  # files saved before Pinc have none
         if kind == "iso":
-            return FarFieldComponent(self._E / EISO, self.theta, self.phi)
+            return FarFieldComponent(self._E / (EISO * scale), self.theta, self.phi)
         else:
-            return FarFieldComponent(self._E / EOMNI, self.theta, self.phi)
+            return FarFieldComponent(self._E / (EOMNI * scale), self.theta, self.phi)
 
     @property
     def dir(self, kind: Literal["iso", "omni"] = "iso") -> FarFieldComponent:
